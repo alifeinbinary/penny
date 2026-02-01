@@ -1,0 +1,47 @@
+# Claude ignore file - exclude these files/directories from Claude's context
+
+# Dependencies
+node_modules/
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+target/
+build/
+dist/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+
+# Large data files
+*.db
+*.sqlite
+*.sql
+data/
+*.csv
+*.parquet
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.exe
