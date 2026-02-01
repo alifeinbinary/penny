@@ -12,7 +12,7 @@ COPY pyproject.toml ./
 COPY penny/ ./penny/
 
 # Install dependencies with uv
-RUN uv pip install --system websockets httpx python-dotenv
+RUN uv pip install --system websockets httpx python-dotenv pydantic
 
 # Run the agent
 CMD ["python", "-m", "penny.agent"]

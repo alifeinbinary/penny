@@ -7,10 +7,10 @@ import signal
 import sys
 from typing import Any
 
-import httpx
 import websockets
 
 from penny.config import Config, setup_logging
+from penny.signal import SignalClient
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class PennyAgent:
     def __init__(self, config: Config):
         """Initialize the agent with configuration."""
         self.config = config
-        self.http_client = httpx.AsyncClient(timeout=30.0)
+        self.signal_client = SignalClient(config.signal_api_url, config.signal_number)
         self.running = True
 
         # Setup signal handlers for graceful shutdown
@@ -33,57 +33,28 @@ class PennyAgent:
         logger.info("Received shutdown signal, stopping agent...")
         self.running = False
 
-    async def send_signal_message(self, recipient: str, message: str) -> bool:
-        """
-        Send a message via Signal.
-
-        Args:
-            recipient: Phone number to send to
-            message: Message content
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            url = f"{self.config.signal_api_url}/v2/send"
-            payload = {
-                "message": message,
-                "number": self.config.signal_number,
-                "recipients": [recipient],
-            }
-
-            logger.debug("Sending to %s: %s", url, payload)
-
-            response = await self.http_client.post(url, json=payload)
-            response.raise_for_status()
-
-            logger.info("Sent message to %s (length: %d), status: %d", recipient, len(message), response.status_code)
-            logger.debug("Response: %s", response.text)
-            return True
-
-        except httpx.HTTPError as e:
-            logger.error("Failed to send Signal message: %s", e)
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error("Response status: %d, body: %s", e.response.status_code, e.response.text)
-            return False
-
-    async def handle_message(self, envelope: dict) -> None:
+    async def handle_message(self, envelope_data: dict) -> None:
         """
         Process an incoming Signal message.
 
         Args:
-            envelope: Signal message envelope from WebSocket
+            envelope_data: Signal message envelope from WebSocket
         """
         try:
-            logger.debug("Processing envelope: %s", envelope)
+            # Parse envelope using SignalClient
+            envelope = self.signal_client.parse_envelope(envelope_data)
+            if envelope is None:
+                return
 
-            # Extract the inner envelope
-            inner_envelope = envelope.get("envelope", {})
+            logger.debug("Processing envelope from: %s", envelope.envelope.source)
 
-            # Extract message data
-            data_message = inner_envelope.get("dataMessage", {})
-            sender = inner_envelope.get("source", "unknown")
-            content = data_message.get("message", "").strip()
+            # Check if this is a data message (not typing indicator, etc.)
+            if envelope.envelope.dataMessage is None:
+                logger.debug("Ignoring non-data message")
+                return
+
+            sender = envelope.envelope.source
+            content = envelope.envelope.dataMessage.message.strip()
 
             logger.info("Extracted - sender: %s, content: '%s'", sender, content)
 
@@ -97,7 +68,7 @@ class PennyAgent:
             echo_response = f"Echo: {content}"
             logger.info("Sending echo response to %s: %s", sender, echo_response)
 
-            success = await self.send_signal_message(sender, echo_response)
+            success = await self.signal_client.send_message(sender, echo_response)
 
             if success:
                 logger.info("Successfully sent echo response")
@@ -109,7 +80,7 @@ class PennyAgent:
 
     async def listen_for_messages(self) -> None:
         """Listen for incoming Signal messages via WebSocket."""
-        ws_url = f"ws://{self.config.signal_api_url.replace('http://', '')}/v1/receive/{self.config.signal_number}"
+        ws_url = self.signal_client.get_websocket_url()
 
         while self.running:
             try:
@@ -172,7 +143,7 @@ class PennyAgent:
     async def shutdown(self) -> None:
         """Clean shutdown of resources."""
         logger.info("Shutting down agent...")
-        await self.http_client.aclose()
+        await self.signal_client.close()
         logger.info("Agent shutdown complete")
 
 
