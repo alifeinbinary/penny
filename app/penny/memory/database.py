@@ -139,6 +139,32 @@ class Database:
             logger.error("Failed to log message: %s", e)
             return None
 
+    def get_unsummarized_messages(self) -> list[MessageLog]:
+        """Get all messages that have a parent but no summary yet."""
+        with self.get_session() as session:
+            return (
+                session.query(MessageLog)
+                .filter(
+                    MessageLog.parent_id.isnot(None),
+                    MessageLog.parent_summary.is_(None),
+                )
+                .order_by(MessageLog.timestamp.asc())
+                .all()
+            )
+
+    def set_parent_summary(self, message_id: int, summary: str) -> None:
+        """Store a thread summary on a message."""
+        try:
+            with self.get_session() as session:
+                msg = session.get(MessageLog, message_id)
+                if msg:
+                    msg.parent_summary = summary
+                    session.add(msg)
+                    session.commit()
+                    logger.debug("Set parent_summary on message %d", message_id)
+        except Exception as e:
+            logger.error("Failed to set parent_summary: %s", e)
+
     def find_outgoing_by_content(self, content: str) -> MessageLog | None:
         """
         Find the most recent outgoing message matching the given content.
@@ -161,17 +187,39 @@ class Database:
                 .first()
             )
 
-    def get_thread_history(self, message_id: int, limit: int = 20) -> list[MessageLog]:
+    def get_thread_context(self, quoted_text: str) -> tuple[int | None, list[tuple[str, str]] | None]:
         """
-        Walk up the parent chain from a message to build conversation history.
-        Returns messages in chronological order (oldest first).
+        Look up a quoted message and return its id and conversation context.
+        Uses the cached summary if available, otherwise walks the parent chain.
 
         Args:
-            message_id: The message id to start walking from
-            limit: Max number of messages to collect
+            quoted_text: The text the user quoted/replied to
 
         Returns:
-            List of MessageLog entries, oldest first
+            Tuple of (parent_id, history) where history is a list of (role, content) tuples,
+            or (None, None) if the quoted message wasn't found.
+        """
+        parent_msg = self.find_outgoing_by_content(quoted_text)
+        if not parent_msg:
+            return None, None
+
+        if parent_msg.parent_summary:
+            history = [("system", f"Previous conversation summary: {parent_msg.parent_summary}")]
+            logger.info("Using cached thread summary for context")
+        else:
+            thread = self._walk_thread(parent_msg.id)
+            history = [
+                ("user" if m.direction == "incoming" else "assistant", m.content)
+                for m in thread
+            ]
+            logger.info("Built thread history with %d messages", len(history))
+
+        return parent_msg.id, history
+
+    def _walk_thread(self, message_id: int, limit: int = 20) -> list[MessageLog]:
+        """
+        Walk up the parent chain from a message.
+        Returns messages in chronological order (oldest first).
         """
         history = []
         with self.get_session() as session:

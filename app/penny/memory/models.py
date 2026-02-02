@@ -45,3 +45,4 @@ class MessageLog(SQLModel, table=True):
     sender: str = Field(index=True)
     content: str
     parent_id: Optional[int] = Field(default=None, foreign_key="messagelog.id", index=True)
+    parent_summary: Optional[str] = Field(default=None)  # Summarized thread history

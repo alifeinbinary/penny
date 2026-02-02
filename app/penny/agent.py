@@ -5,6 +5,7 @@ import json
 import logging
 import signal
 import sys
+import time
 from typing import Any
 
 import websockets
@@ -14,20 +15,10 @@ from penny.channels import MessageChannel, SignalChannel
 from penny.config import Config, setup_logging
 from penny.memory import Database
 from penny.ollama import OllamaClient
+from penny.constants import SUMMARIZE_PROMPT, SYSTEM_PROMPT
 from penny.tools import PerplexitySearchTool, ToolRegistry
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = (
-    "You are Penny, a helpful AI assistant. "
-    "You MUST use the perplexity_search tool for every message to research your answer. "
-    "Never answer from your own knowledge alone - always search first, then respond "
-    "based on the search results. "
-    "Only use plain text - no markdown, no bullet points, no formatting. "
-    "Only use lowercase. "
-    "Speak casually. "
-    "End every response with an emoji."
-)
 
 
 class PennyAgent:
@@ -55,6 +46,7 @@ class PennyAgent:
         )
 
         self.running = True
+        self.last_message_time = time.monotonic()
 
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -67,26 +59,19 @@ class PennyAgent:
     async def handle_message(self, envelope_data: dict) -> None:
         """Process an incoming message through the agentic controller."""
         try:
+            self.last_message_time = time.monotonic()
+
             message = self.channel.extract_message(envelope_data)
             if message is None:
                 return
 
             logger.info("Received message from %s: %s", message.sender, message.content)
 
-            # Find parent message if this is a quoted reply
+            # Find parent message and build thread context if this is a quoted reply
             parent_id = None
             history = None
             if message.quoted_text:
-                parent_msg = self.db.find_outgoing_by_content(message.quoted_text)
-                if parent_msg:
-                    parent_id = parent_msg.id
-                    # Walk up the thread to build conversation history
-                    thread = self.db.get_thread_history(parent_msg.id)
-                    history = [
-                        ("user" if m.direction == "incoming" else "assistant", m.content)
-                        for m in thread
-                    ]
-                    logger.info("Built thread history with %d messages", len(history))
+                parent_id, history = self.db.get_thread_context(message.quoted_text)
 
             # Log incoming message linked to parent
             incoming_id = self.db.log_message("incoming", message.sender, message.content, parent_id=parent_id)
@@ -155,6 +140,52 @@ class PennyAgent:
 
         logger.info("Message listener stopped")
 
+    async def summarize_threads(self) -> None:
+        """Background loop: summarize unsummarized threads when idle."""
+        while self.running:
+            await asyncio.sleep(1)
+
+            idle_seconds = time.monotonic() - self.last_message_time
+            if idle_seconds < self.config.summarize_idle_seconds:
+                continue
+
+            unsummarized = self.db.get_unsummarized_messages()
+            if not unsummarized:
+                continue
+
+            logger.info("Idle for %.0fs, summarizing %d threads", idle_seconds, len(unsummarized))
+
+            for msg in unsummarized:
+                if not self.running:
+                    break
+
+                # Skip if no longer idle (new message came in)
+                if time.monotonic() - self.last_message_time < self.config.summarize_idle_seconds:
+                    logger.info("No longer idle, pausing summarization")
+                    break
+
+                thread = self.db._walk_thread(msg.id)
+                if len(thread) < 2:
+                    # Single message, just mark it with empty summary to skip next time
+                    self.db.set_parent_summary(msg.id, "")
+                    continue
+
+                # Format thread for summarization
+                thread_text = "\n".join(
+                    f"{'user' if m.direction == 'incoming' else 'assistant'}: {m.content}"
+                    for m in thread
+                )
+
+                try:
+                    response = await self.ollama_client.generate(
+                        f"{SUMMARIZE_PROMPT}{thread_text}"
+                    )
+                    summary = response.content.strip()
+                    self.db.set_parent_summary(msg.id, summary)
+                    logger.info("Summarized thread for message %d (length: %d)", msg.id, len(summary))
+                except Exception as e:
+                    logger.error("Failed to summarize thread for message %d: %s", msg.id, e)
+
     async def run(self) -> None:
         """Run the agent."""
         logger.info("Starting Penny AI agent...")
@@ -162,7 +193,10 @@ class PennyAgent:
         logger.info("Ollama model: %s", self.config.ollama_model)
 
         try:
-            await self.listen_for_messages()
+            await asyncio.gather(
+                self.listen_for_messages(),
+                self.summarize_threads(),
+            )
         finally:
             await self.shutdown()
 
