@@ -88,6 +88,7 @@ class PennyAgent:
 
         # Track last compaction time to avoid repeated summarization
         self.last_compaction_time = time.time()
+        self.messages_since_compaction = 0
 
         self.running = True
 
@@ -215,6 +216,7 @@ class PennyAgent:
 
                 # Update last message time for idle detection
                 self.last_message_time = time.time()
+                self.messages_since_compaction += 1
 
                 # Log incoming message
                 self.db.log_message(
@@ -382,16 +384,22 @@ class PennyAgent:
                         # No pending tasks - check if we should compactify history
                         # Only compactify if:
                         # 1. Been idle long enough
-                        # 2. Haven't compacted recently (avoid repeated compaction)
+                        # 2. Enough new messages since last compaction (configurable)
+                        # 3. Haven't compacted too recently (avoid repeated compaction)
                         time_since_compaction = time.time() - self.last_compaction_time
+                        enough_new_messages = self.messages_since_compaction >= self.config.history_compaction_min_new_messages
 
-                        if idle_time >= self.config.history_compaction_idle_seconds and time_since_compaction >= self.config.history_compaction_idle_seconds:
-                            logger.info("Dormant for %.0f seconds with no tasks, compactifying history", idle_time)
+                        if (idle_time >= self.config.history_compaction_idle_seconds
+                            and enough_new_messages
+                            and time_since_compaction >= self.config.history_compaction_idle_seconds):
+                            logger.info("Dormant for %.0f seconds with no tasks, compactifying history (%d new messages)",
+                                      idle_time, self.messages_since_compaction)
                             await self._compactify_history()
                             self.last_compaction_time = time.time()
+                            self.messages_since_compaction = 0
                         else:
-                            logger.debug("No pending tasks, idle=%.0fs, since_compaction=%.0fs",
-                                       idle_time, time_since_compaction)
+                            logger.debug("No pending tasks, idle=%.0fs, since_compaction=%.0fs, new_messages=%d",
+                                       idle_time, time_since_compaction, self.messages_since_compaction)
 
                 # Check periodically
                 await asyncio.sleep(self.config.task_check_interval)
