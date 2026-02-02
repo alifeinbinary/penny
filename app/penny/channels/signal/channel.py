@@ -34,6 +34,11 @@ class SignalChannel(MessageChannel):
 
     async def send_message(self, recipient: str, message: str) -> bool:
         """Send a message via Signal."""
+        # Validate message is not empty
+        if not message or not message.strip():
+            logger.error("Attempted to send empty message to %s", recipient)
+            raise ValueError("Cannot send empty or whitespace-only message")
+
         try:
             url = f"{self.api_url}/v2/send"
             request = SendMessageRequest(

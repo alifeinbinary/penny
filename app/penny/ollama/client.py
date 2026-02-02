@@ -2,23 +2,13 @@
 
 import logging
 
-import httpx
-from pydantic import ValidationError
-
-from penny.ollama.models import (
-    ChunkType,
-    GenerateRequest,
-    GenerateResponse,
-    OllamaStreamResponse,
-    ResponseLine,
-    StreamChunk,
-)
+import ollama
 
 logger = logging.getLogger(__name__)
 
 
 class OllamaClient:
-    """Client for interacting with Ollama API."""
+    """Client for interacting with Ollama API using the official SDK."""
 
     def __init__(self, api_url: str, model: str):
         """
@@ -30,184 +20,74 @@ class OllamaClient:
         """
         self.api_url = api_url.rstrip("/")
         self.model = model
-        self.http_client = httpx.AsyncClient(timeout=120.0)
-        self.last_thinking = ""  # Stores thinking from most recent stream
+
+        # Initialize the official Ollama client
+        self.client = ollama.AsyncClient(host=api_url)
+
         logger.info("Initialized Ollama client: url=%s, model=%s", api_url, model)
 
-    async def generate(self, prompt: str) -> str | None:
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict] | None = None,
+    ) -> dict:
         """
-        Generate a completion for the given prompt.
+        Generate a chat completion with optional tool calling.
 
         Args:
-            prompt: The prompt to generate from
+            messages: List of message dicts with 'role' and 'content'
+            tools: Optional list of tool definitions in Ollama format
 
         Returns:
-            Generated text or None if generation fails
+            Response dict with 'message' containing the assistant's response
         """
         try:
-            url = f"{self.api_url}/api/generate"
+            logger.debug("Sending chat request to Ollama")
+            logger.debug("Messages: %s", messages)
+            if tools:
+                logger.debug("Tools: %d available", len(tools))
 
-            # Create request
-            request = GenerateRequest(
+            response = await self.client.chat(
                 model=self.model,
-                prompt=prompt,
-                stream=False,
+                messages=messages,
+                tools=tools,
             )
 
-            logger.debug("Sending to Ollama: %s", url)
-            logger.debug("Prompt length: %d chars", len(prompt))
+            logger.debug("Raw Ollama response: %s", response)
 
-            response = await self.http_client.post(
-                url,
-                json=request.model_dump(),
-            )
-            response.raise_for_status()
+            # Extract message from response
+            message = response.get("message", {})
 
-            # Parse response
-            data = response.json()
-            result = GenerateResponse.model_validate(data)
+            # Log tool calls if present
+            if "tool_calls" in message:
+                logger.info("Received %d tool call(s)", len(message["tool_calls"]))
+                for tc in message["tool_calls"]:
+                    logger.debug("Tool call: %s", tc)
 
-            logger.info(
-                "Generated response: %d chars (eval_count: %s, eval_duration: %sms)",
-                len(result.response),
-                result.eval_count,
-                result.eval_duration // 1_000_000 if result.eval_duration else None,
-            )
+            # Log thinking if present
+            if "thinking" in response:
+                logger.debug("Model thinking: %s", response["thinking"][:200])
 
-            return result.response
-
-        except httpx.HTTPError as e:
-            logger.error("Ollama API error: %s", e)
-            if hasattr(e, "response") and e.response is not None:
-                logger.error(
-                    "Response status: %d, body: %s",
-                    e.response.status_code,
-                    e.response.text,
-                )
-            return None
-
-        except ValidationError as e:
-            logger.error("Failed to parse Ollama response: %s", e)
-            return None
+            return response
 
         except Exception as e:
-            logger.exception("Unexpected error during generation: %s", e)
-            return None
+            logger.exception("Ollama chat error: %s", e)
+            raise
 
-    async def generate_stream(self, prompt: str):
+    async def generate(self, prompt: str, tools: list[dict] | None = None) -> dict:
         """
-        Generate a completion as a stream of text chunks.
+        Generate a completion for a prompt (converts to chat format internally).
 
         Args:
             prompt: The prompt to generate from
+            tools: Optional list of tool definitions
 
-        Yields:
-            Dict with 'type' ('thinking' or 'response') and 'content' (text chunk)
+        Returns:
+            Response dict with 'message'
         """
-        try:
-            import json
-
-            url = f"{self.api_url}/api/generate"
-
-            # Create streaming request
-            request = GenerateRequest(
-                model=self.model,
-                prompt=prompt,
-                stream=True,
-            )
-
-            logger.debug("Sending streaming request to Ollama: %s", url)
-            logger.debug("Prompt length: %d chars", len(prompt))
-
-            async with self.http_client.stream(
-                "POST",
-                url,
-                json=request.model_dump(),
-            ) as response:
-                response.raise_for_status()
-
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-
-                    try:
-                        data = json.loads(line)
-                        chunk = OllamaStreamResponse.model_validate(data)
-
-                        # Check for thinking chunk (from thinking models)
-                        if chunk.thinking:
-                            yield StreamChunk(type=ChunkType.THINKING, content=chunk.thinking)
-
-                        # Check for response chunk
-                        if chunk.response:
-                            yield StreamChunk(type=ChunkType.RESPONSE, content=chunk.response)
-
-                        # Check if done
-                        if chunk.done:
-                            logger.info("Stream completed")
-                            break
-
-                    except (json.JSONDecodeError, ValidationError) as e:
-                        logger.warning("Failed to parse stream chunk: %s", e)
-                        continue
-
-        except httpx.HTTPError as e:
-            logger.error("Ollama streaming API error: %s", e)
-            if hasattr(e, "response") and e.response is not None:
-                logger.error(
-                    "Response status: %d, body: %s",
-                    e.response.status_code,
-                    e.response.text,
-                )
-
-        except Exception as e:
-            logger.exception("Unexpected error during streaming generation: %s", e)
-
-    async def stream_response(self, prompt: str):
-        """
-        Stream response lines with thinking data.
-
-        Buffers response chunks and yields complete lines (split on newlines).
-        The first yielded dict includes accumulated thinking; subsequent dicts have thinking as None.
-
-        Args:
-            prompt: The prompt to generate from
-
-        Yields:
-            Dict with 'line' (response text) and 'thinking' (reasoning, only in first yield)
-        """
-        # Reset thinking for this stream
-        self.last_thinking = ""
-        response_buffer = ""
-        first_line = True
-
-        async for chunk_data in self.generate_stream(prompt):
-            if chunk_data.type == ChunkType.THINKING:
-                # Accumulate thinking internally
-                self.last_thinking += chunk_data.content
-
-            elif chunk_data.type == ChunkType.RESPONSE:
-                # Accumulate response
-                response_buffer += chunk_data.content
-
-                # Yield complete lines when we hit newlines
-                if "\n" in response_buffer:
-                    parts = response_buffer.split("\n")
-                    response_buffer = parts[-1]  # Keep incomplete part
-
-                    # Yield all complete lines
-                    for line in parts[:-1]:
-                        if line.strip():  # Only yield non-empty lines
-                            thinking = self.last_thinking.strip() if first_line and self.last_thinking else None
-                            yield ResponseLine(line=line, thinking=thinking)
-                            first_line = False
-
-        # Yield any remaining buffer
-        if response_buffer.strip():
-            thinking = self.last_thinking.strip() if first_line and self.last_thinking else None
-            yield ResponseLine(line=response_buffer, thinking=thinking)
+        messages = [{"role": "user", "content": prompt}]
+        return await self.chat(messages, tools)
 
     async def close(self) -> None:
-        """Close the HTTP client."""
-        await self.http_client.aclose()
+        """Close the client (SDK handles cleanup automatically)."""
         logger.info("Ollama client closed")
