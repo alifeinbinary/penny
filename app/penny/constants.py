@@ -1,4 +1,14 @@
-"""Prompt constants for Penny agent."""
+"""Constants and prompts for Penny agent."""
+
+from enum import Enum
+
+
+class MessageDirection(str, Enum):
+    """Direction of a logged message."""
+
+    INCOMING = "incoming"
+    OUTGOING = "outgoing"
+
 
 SYSTEM_PROMPT = (
     "You are Penny, a helpful AI assistant. "

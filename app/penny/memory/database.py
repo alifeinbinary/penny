@@ -6,6 +6,8 @@ from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine
 
+from penny.agentic.models import MessageRole
+from penny.constants import MessageDirection
 from penny.memory.models import MessageLog, PromptLog, SearchLog
 
 logger = logging.getLogger(__name__)
@@ -140,11 +142,12 @@ class Database:
             return None
 
     def get_unsummarized_messages(self) -> list[MessageLog]:
-        """Get all messages that have a parent but no summary yet."""
+        """Get all outgoing messages that have a parent but no summary yet."""
         with self.get_session() as session:
             return (
                 session.query(MessageLog)
                 .filter(
+                    MessageLog.direction == MessageDirection.OUTGOING,
                     MessageLog.parent_id.isnot(None),
                     MessageLog.parent_summary.is_(None),
                 )
@@ -180,7 +183,7 @@ class Database:
             return (
                 session.query(MessageLog)
                 .filter(
-                    MessageLog.direction == "outgoing",
+                    MessageLog.direction == MessageDirection.OUTGOING,
                     MessageLog.content == content,
                 )
                 .order_by(MessageLog.timestamp.desc())
@@ -204,12 +207,12 @@ class Database:
             return None, None
 
         if parent_msg.parent_summary:
-            history = [("system", f"Previous conversation summary: {parent_msg.parent_summary}")]
+            history = [(MessageRole.SYSTEM, f"Previous conversation summary: {parent_msg.parent_summary}")]
             logger.info("Using cached thread summary for context")
         else:
             thread = self._walk_thread(parent_msg.id)
             history = [
-                ("user" if m.direction == "incoming" else "assistant", m.content)
+                (MessageRole.USER if m.direction == MessageDirection.INCOMING else MessageRole.ASSISTANT, m.content)
                 for m in thread
             ]
             logger.info("Built thread history with %d messages", len(history))
