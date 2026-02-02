@@ -1,56 +1,47 @@
 """SQLModel models for Penny's memory."""
 
+import json
 from datetime import datetime
-from enum import Enum
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
 
-class MessageDirection(str, Enum):
-    """Direction of message flow."""
+class PromptLog(SQLModel, table=True):
+    """Log of every prompt sent to Ollama and its response."""
 
-    INCOMING = "incoming"
-    OUTGOING = "outgoing"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    timestamp: datetime = Field(default_factory=datetime.utcnow, index=True)
+    model: str
+    messages: str  # JSON-serialized list of message dicts
+    tools: Optional[str] = None  # JSON-serialized tool definitions
+    response: str  # JSON-serialized response dict
+    thinking: Optional[str] = None  # Model's thinking/reasoning trace
+    duration_ms: Optional[int] = None  # How long the call took
+
+    def get_messages(self) -> list[dict]:
+        return json.loads(self.messages)
+
+    def get_response(self) -> dict:
+        return json.loads(self.response)
 
 
-class TaskStatus(str, Enum):
-    """Status of a task in its lifecycle."""
+class SearchLog(SQLModel, table=True):
+    """Log of every Perplexity search call and its response."""
 
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    timestamp: datetime = Field(default_factory=datetime.utcnow, index=True)
+    query: str = Field(index=True)
+    response: str
+    duration_ms: Optional[int] = None
 
 
-class Message(SQLModel, table=True):
-    """Message log - tracks all incoming and outgoing messages."""
+class MessageLog(SQLModel, table=True):
+    """Log of every user message and agent response."""
 
     id: Optional[int] = Field(default=None, primary_key=True)
     timestamp: datetime = Field(default_factory=datetime.utcnow, index=True)
     direction: str = Field(index=True)  # "incoming" or "outgoing"
-    sender: str = Field(index=True)  # Phone number
-    recipient: str = Field(index=True)  # Phone number
+    sender: str = Field(index=True)
     content: str
-    chunk_index: Optional[int] = Field(default=None)  # For streaming chunks
-    thinking: Optional[str] = Field(default=None)  # LLM reasoning for thinking models
-
-
-class Memory(SQLModel, table=True):
-    """Long-term memory storage for facts, preferences, and rules."""
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    content: str = Field(index=True)  # The memory text
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
-
-
-class Task(SQLModel, table=True):
-    """Deferred task that Penny will work on during idle time."""
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    content: str = Field(index=True)  # The task description
-    status: str = Field(default=TaskStatus.PENDING.value, index=True)
-    requester: str = Field(index=True)  # Phone number of requester
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    result: Optional[str] = None  # Final result text
+    parent_id: Optional[int] = Field(default=None, foreign_key="messagelog.id", index=True)

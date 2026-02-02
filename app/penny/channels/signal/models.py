@@ -12,6 +12,19 @@ class HttpMethod(str, Enum):
     DELETE = "DELETE"
 
 
+class Quote(BaseModel):
+    """Quoted/replied message from Signal."""
+
+    id: int
+    author: str | None = None
+    authorNumber: str | None = Field(default=None, alias="authorNumber")
+    authorUuid: str | None = Field(default=None, alias="authorUuid")
+    text: str | None = None
+
+    class Config:
+        populate_by_name = True
+
+
 class DataMessage(BaseModel):
     """Data message from Signal."""
 
@@ -20,6 +33,7 @@ class DataMessage(BaseModel):
     expiresInSeconds: int = Field(default=0, alias="expiresInSeconds")
     isExpirationUpdate: bool = Field(default=False, alias="isExpirationUpdate")
     viewOnce: bool = Field(default=False, alias="viewOnce")
+    quote: Quote | None = None
 
     class Config:
         populate_by_name = True

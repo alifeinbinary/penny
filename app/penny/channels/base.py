@@ -10,6 +10,7 @@ class IncomingMessage(BaseModel):
 
     sender: str
     content: str
+    quoted_text: str | None = None
 
 
 class MessageChannel(ABC):

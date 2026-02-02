@@ -1,13 +1,11 @@
 """Memory module for Penny - message logging and storage."""
 
 from penny.memory.database import Database
-from penny.memory.models import Memory, Message, MessageDirection, Task, TaskStatus
+from penny.memory.models import MessageLog, PromptLog, SearchLog
 
 __all__ = [
     "Database",
-    "Message",
-    "Memory",
-    "Task",
-    "MessageDirection",
-    "TaskStatus",
+    "MessageLog",
+    "PromptLog",
+    "SearchLog",
 ]

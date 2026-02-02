@@ -1,8 +1,11 @@
 """Ollama API client for LLM inference."""
 
 import logging
+import time
 
 import ollama
+
+from penny.ollama.models import ChatResponse
 
 logger = logging.getLogger(__name__)
 
@@ -10,16 +13,18 @@ logger = logging.getLogger(__name__)
 class OllamaClient:
     """Client for interacting with Ollama API using the official SDK."""
 
-    def __init__(self, api_url: str, model: str):
+    def __init__(self, api_url: str, model: str, db=None):
         """
         Initialize Ollama client.
 
         Args:
             api_url: Base URL for Ollama API (e.g., http://localhost:11434)
             model: Model name to use (e.g., llama3.2)
+            db: Optional Database instance for logging prompts
         """
         self.api_url = api_url.rstrip("/")
         self.model = model
+        self.db = db
 
         # Initialize the official Ollama client
         self.client = ollama.AsyncClient(host=api_url)
@@ -30,7 +35,7 @@ class OllamaClient:
         self,
         messages: list[dict[str, str]],
         tools: list[dict] | None = None,
-    ) -> dict:
+    ) -> ChatResponse:
         """
         Generate a chat completion with optional tool calling.
 
@@ -39,58 +44,59 @@ class OllamaClient:
             tools: Optional list of tool definitions in Ollama format
 
         Returns:
-            Response dict with 'message' containing the assistant's response
+            ChatResponse with message, thinking, tool calls, etc.
         """
         try:
             logger.debug("Sending chat request to Ollama")
-            logger.debug("Messages: %s", messages)
-            if tools:
-                logger.debug("Tools: %d available", len(tools))
 
-            response = await self.client.chat(
+            start = time.time()
+
+            raw = await self.client.chat(
                 model=self.model,
                 messages=messages,
                 tools=tools,
             )
 
-            # Convert response to dict if it's not already
-            if hasattr(response, 'model_dump'):
-                response_dict = response.model_dump()
-            elif hasattr(response, '__dict__'):
-                response_dict = dict(response)
+            duration_ms = int((time.time() - start) * 1000)
+
+            # Convert raw response to dict then parse with pydantic
+            if hasattr(raw, 'model_dump'):
+                raw_dict = raw.model_dump()
+            elif hasattr(raw, '__dict__'):
+                raw_dict = dict(raw)
             else:
-                response_dict = dict(response)
+                raw_dict = dict(raw)
 
-            logger.debug("Raw Ollama response type: %s", type(response))
-            logger.debug("Response keys: %s", list(response_dict.keys()) if isinstance(response_dict, dict) else "not a dict")
+            response = ChatResponse(**raw_dict)
 
-            # Extract message from response
-            message = response_dict.get("message", {})
+            # Extract thinking from either top-level or message
+            thinking = response.thinking or response.message.thinking
 
-            # Log tool calls if present (check for both existence and non-None)
-            tool_calls = message.get("tool_calls")
-            if tool_calls:
-                logger.info("Received %d tool call(s)", len(tool_calls))
-                for tc in tool_calls:
-                    logger.debug("Tool call: %s", tc)
-
-            # Log thinking if present
-            thinking = response_dict.get("thinking")
+            if response.has_tool_calls:
+                logger.info("Received %d tool call(s)", len(response.message.tool_calls))
             if thinking:
                 logger.debug("Model thinking: %s", thinking[:200])
 
-            # Check message for thinking too
-            message_thinking = message.get("thinking")
-            if message_thinking:
-                logger.debug("Message thinking: %s", message_thinking[:200])
+            logger.debug("Response content length: %d", len(response.content))
 
-            return response_dict
+            # Log to database
+            if self.db:
+                self.db.log_prompt(
+                    model=self.model,
+                    messages=messages,
+                    response=raw_dict,
+                    tools=tools,
+                    thinking=thinking,
+                    duration_ms=duration_ms,
+                )
+
+            return response
 
         except Exception as e:
             logger.exception("Ollama chat error: %s", e)
             raise
 
-    async def generate(self, prompt: str, tools: list[dict] | None = None) -> dict:
+    async def generate(self, prompt: str, tools: list[dict] | None = None) -> ChatResponse:
         """
         Generate a completion for a prompt (converts to chat format internally).
 
@@ -99,7 +105,7 @@ class OllamaClient:
             tools: Optional list of tool definitions
 
         Returns:
-            Response dict with 'message'
+            ChatResponse
         """
         messages = [{"role": "user", "content": prompt}]
         return await self.chat(messages, tools)

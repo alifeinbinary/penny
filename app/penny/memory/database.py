@@ -1,13 +1,12 @@
 """Database connection and session management."""
 
+import json
 import logging
-from datetime import datetime
 from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine
 
-from penny.constants import DatabaseConstants
-from penny.memory.models import Memory, Message, Task, TaskStatus
+from penny.memory.models import MessageLog, PromptLog, SearchLog
 
 logger = logging.getLogger(__name__)
 
@@ -41,223 +40,148 @@ class Database:
         """Get a database session."""
         return Session(self.engine)
 
-    def get_conversation_history(self, sender: str, recipient: str, limit: int = 20) -> list:
+    def log_prompt(
+        self,
+        model: str,
+        messages: list[dict],
+        response: dict,
+        tools: list[dict] | None = None,
+        thinking: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         """
-        Get recent conversation history between sender and recipient.
-        Groups chunked messages into single conversation turns.
+        Log a prompt/response exchange with Ollama.
 
         Args:
-            sender: Phone number of sender
-            recipient: Phone number of recipient
-            limit: Maximum number of conversation turns to retrieve
-
-        Returns:
-            List of Message objects (with chunks stitched together), ordered by timestamp (oldest first)
+            model: Model name used
+            messages: Messages sent to the model
+            response: Response dict from the model
+            tools: Optional tool definitions sent
+            thinking: Optional model thinking/reasoning trace
+            duration_ms: Optional call duration in milliseconds
         """
-        with self.get_session() as session:
-            # Get more messages than limit to ensure we have enough after grouping
-            # Fetch limit * multiplier to account for multi-chunk messages
-            messages = session.query(Message).filter(
-                ((Message.sender == sender) & (Message.recipient == recipient))
-                | ((Message.sender == recipient) & (Message.recipient == sender))
-            ).order_by(Message.timestamp.desc()).limit(limit * DatabaseConstants.MESSAGE_FETCH_MULTIPLIER).all()
-
-            # Reverse to get chronological order (oldest first)
-            messages = list(reversed(messages))
-
-            # Group messages by conversation turn (same direction, sequential chunks)
-            turns = []
-            current_turn = None
-
-            for msg in messages:
-                # Check if this is part of current turn (same direction, chunk_index continues)
-                if current_turn and msg.direction == current_turn.direction:
-                    # Check if this is next chunk in sequence
-                    if msg.chunk_index is not None and current_turn.chunk_index is not None:
-                        if msg.chunk_index == current_turn.chunk_index + 1:
-                            # Stitch content together with newline
-                            current_turn.content += "\n" + msg.content
-                            current_turn.chunk_index = msg.chunk_index
-                            continue
-
-                # Start new turn
-                if current_turn:
-                    turns.append(current_turn)
-
-                # Create a copy of the message for the new turn
-                current_turn = Message(
-                    direction=msg.direction,
-                    sender=msg.sender,
-                    recipient=msg.recipient,
-                    content=msg.content,
-                    chunk_index=msg.chunk_index,
-                    thinking=msg.thinking,
-                    timestamp=msg.timestamp,
+        try:
+            with self.get_session() as session:
+                log = PromptLog(
+                    model=model,
+                    messages=json.dumps(messages),
+                    tools=json.dumps(tools) if tools else None,
+                    response=json.dumps(response),
+                    thinking=thinking,
+                    duration_ms=duration_ms,
                 )
+                session.add(log)
+                session.commit()
+                logger.debug("Logged prompt exchange (model=%s)", model)
+        except Exception as e:
+            logger.error("Failed to log prompt: %s", e)
 
-            # Don't forget the last turn
-            if current_turn:
-                turns.append(current_turn)
+    def log_search(
+        self,
+        query: str,
+        response: str,
+        duration_ms: int | None = None,
+    ) -> None:
+        """
+        Log a Perplexity search call.
 
-            # Return last N turns
-            return turns[-limit:] if len(turns) > limit else turns
+        Args:
+            query: The search query
+            response: The search response text
+            duration_ms: Optional call duration in milliseconds
+        """
+        try:
+            with self.get_session() as session:
+                log = SearchLog(
+                    query=query,
+                    response=response,
+                    duration_ms=duration_ms,
+                )
+                session.add(log)
+                session.commit()
+                logger.debug("Logged search query: %s", query[:50])
+        except Exception as e:
+            logger.error("Failed to log search: %s", e)
 
     def log_message(
         self,
         direction: str,
         sender: str,
-        recipient: str,
         content: str,
-        chunk_index: int | None = None,
-        thinking: str | None = None,
-    ) -> None:
+        parent_id: int | None = None,
+    ) -> int | None:
         """
-        Log a message to the database.
+        Log a user message or agent response.
 
         Args:
-            direction: "incoming" or "outgoing"
-            sender: Phone number of sender
-            recipient: Phone number of recipient
-            content: Message content
-            chunk_index: Optional chunk index for streaming responses
-            thinking: Optional LLM reasoning text for thinking models
-        """
+            direction: "incoming" for user messages, "outgoing" for agent responses
+            sender: Who sent the message (phone number or "agent")
+            content: The message text
+            parent_id: Optional id of the parent message in the thread
 
+        Returns:
+            The id of the created message, or None on failure
+        """
         try:
             with self.get_session() as session:
-                message = Message(
+                log = MessageLog(
                     direction=direction,
                     sender=sender,
-                    recipient=recipient,
                     content=content,
-                    chunk_index=chunk_index,
-                    thinking=thinking,
+                    parent_id=parent_id,
                 )
-                session.add(message)
+                session.add(log)
                 session.commit()
-                logger.debug("Logged %s message: %s -> %s", direction, sender, recipient)
+                session.refresh(log)
+                logger.debug("Logged %s message from %s (id=%d)", direction, sender, log.id)
+                return log.id
         except Exception as e:
             logger.error("Failed to log message: %s", e)
+            return None
 
-    def store_memory(self, content: str) -> None:
+    def find_outgoing_by_content(self, content: str) -> MessageLog | None:
         """
-        Store a long-term memory.
+        Find the most recent outgoing message matching the given content.
+        Used to look up which agent response a user is quoting.
 
         Args:
-            content: The memory content to store
-        """
-
-        try:
-            with self.get_session() as session:
-                memory = Memory(content=content)
-                session.add(memory)
-                session.commit()
-                logger.info("Stored memory: %s", content[:50])
-        except Exception as e:
-            logger.error("Failed to store memory: %s", e)
-
-    def get_all_memories(self) -> list:
-        """
-        Get all stored memories.
+            content: The quoted text to search for
 
         Returns:
-            List of Memory objects, ordered by creation time
+            The matching MessageLog, or None
         """
-
         with self.get_session() as session:
-            memories = session.query(Memory).order_by(Memory.created_at).all()
-            return list(memories)
-
-    def compact_memories(self, summary: str) -> None:
-        """
-        Replace all memories with a single summary memory.
-
-        Args:
-            summary: The compacted memory summary
-        """
-
-        with self.get_session() as session:
-            # Delete all existing memories
-            session.query(Memory).delete()
-
-            # Create new summary memory
-            memory = Memory(content=summary)
-            session.add(memory)
-            session.commit()
-            logger.info("Compacted memories into summary (%d chars)", len(summary))
-
-    def create_task(self, content: str, requester: str):
-        """
-        Create a new pending task.
-
-        Args:
-            content: The task description
-            requester: Phone number of the requester
-
-        Returns:
-            The created Task object
-        """
-
-        with self.get_session() as session:
-            task = Task(content=content, requester=requester)
-            session.add(task)
-            session.commit()
-            session.refresh(task)
-            logger.info("Created task %d: %s", task.id, content[:50])
-            return task
-
-    def get_pending_tasks(self) -> list:
-        """
-        Get all pending tasks ordered by creation time.
-
-        Returns:
-            List of Task objects with status="pending"
-        """
-
-        with self.get_session() as session:
-            tasks = (
-                session.query(Task)
-                .filter(Task.status == TaskStatus.PENDING.value)
-                .order_by(Task.created_at)
-                .all()
+            return (
+                session.query(MessageLog)
+                .filter(
+                    MessageLog.direction == "outgoing",
+                    MessageLog.content == content,
+                )
+                .order_by(MessageLog.timestamp.desc())
+                .first()
             )
-            return list(tasks)
 
-    def update_task_status(self, task_id: int, status: str, started_at=None) -> None:
+    def get_thread_history(self, message_id: int, limit: int = 20) -> list[MessageLog]:
         """
-        Update task status.
+        Walk up the parent chain from a message to build conversation history.
+        Returns messages in chronological order (oldest first).
 
         Args:
-            task_id: ID of the task to update
-            status: New status (pending/in_progress/completed)
-            started_at: Optional datetime when task started
+            message_id: The message id to start walking from
+            limit: Max number of messages to collect
+
+        Returns:
+            List of MessageLog entries, oldest first
         """
-
-
+        history = []
         with self.get_session() as session:
-            task = session.get(Task, task_id)
-            if task:
-                task.status = status
-                if started_at:
-                    task.started_at = started_at
-                session.commit()
-                logger.info("Updated task %d status to %s", task_id, status)
+            current_id = message_id
+            while current_id is not None and len(history) < limit:
+                msg = session.get(MessageLog, current_id)
+                if msg is None:
+                    break
+                history.append(msg)
+                current_id = msg.parent_id
 
-    def complete_task(self, task_id: int, result: str) -> None:
-        """
-        Mark task as completed with result.
-
-        Args:
-            task_id: ID of the task to complete
-            result: Final result text
-        """
-
-
-        with self.get_session() as session:
-            task = session.get(Task, task_id)
-            if task:
-                task.status = TaskStatus.COMPLETED.value
-                task.completed_at = datetime.utcnow()
-                task.result = result
-                session.commit()
-                logger.info("Completed task %d", task_id)
+        history.reverse()
+        return history
