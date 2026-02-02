@@ -27,8 +27,10 @@ class GenerateResponse(BaseModel):
 
     model: str
     created_at: str = Field(alias="created_at")
-    response: str
+    response: str = ""
+    thinking: str = ""  # For thinking models
     done: bool
+    tool_calls: list[dict[str, Any]] | None = None  # Ollama native tool calling
     context: list[int] | None = None
     total_duration: int | None = Field(default=None, alias="total_duration")
     load_duration: int | None = Field(default=None, alias="load_duration")

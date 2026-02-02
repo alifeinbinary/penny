@@ -9,10 +9,12 @@ from typing import Any
 
 import websockets
 
+from penny.agentic import AgenticController
 from penny.channels import MessageChannel, SignalChannel
 from penny.config import Config, setup_logging
-from penny.memory import Database, build_context
+from penny.memory import Database
 from penny.ollama import OllamaClient
+from penny.tools import GetCurrentTimeTool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,17 @@ class PennyAgent:
         self.db = Database(config.db_path)
         self.db.create_tables()
 
+        # Initialize tools
+        self.tool_registry = ToolRegistry()
+        self.tool_registry.register(GetCurrentTimeTool())
+
+        # Initialize agentic controller
+        self.controller = AgenticController(
+            ollama_client=self.ollama_client,
+            tool_registry=self.tool_registry,
+            max_steps=5,
+        )
+
         self.running = True
 
         # Setup signal handlers for graceful shutdown
@@ -40,42 +53,6 @@ class PennyAgent:
         """Handle shutdown signals."""
         logger.info("Received shutdown signal, stopping agent...")
         self.running = False
-
-    async def _stream_and_send_response(self, sender: str, context: str) -> None:
-        """
-        Stream response from Ollama and send chunks to Signal.
-
-        Args:
-            sender: Phone number of the recipient
-            context: Conversation context to send to Ollama
-        """
-        logger.info("Generating streaming response with Ollama...")
-        logger.debug("Context length: %d chars", len(context))
-        chunk_count = 0
-
-        try:
-            # Stream response lines from Ollama
-            async for chunk in self.ollama_client.stream_response(context):
-                # Turn off typing indicator before sending
-                await self.channel.send_typing(sender, False)
-
-                logger.debug("Sending chunk %d: %s...", chunk_count, chunk.line[:50])
-                await self.channel.send_message(sender, chunk.line)
-
-                # Log to database (thinking included in first chunk)
-                self.db.log_message("outgoing", self.config.signal_number, sender, chunk.line, chunk_count, thinking=chunk.thinking)
-                chunk_count += 1
-
-                # Turn typing indicator back on for next chunk
-                await self.channel.send_typing(sender, True)
-
-            logger.info("Sent %d chunks to %s", chunk_count, sender)
-
-        except Exception as e:
-            logger.error("Error during streaming generation: %s", e)
-            error_msg = "Sorry, I encountered an error generating a response."
-            await self.channel.send_message(sender, error_msg)
-            self.db.log_message("outgoing", self.config.signal_number, sender, error_msg)
 
     async def handle_message(self, envelope_data: dict) -> None:
         """
@@ -99,12 +76,32 @@ class PennyAgent:
             await self.channel.send_typing(message.sender, True)
 
             try:
-                # Build context from conversation history
+                # Get conversation history
                 history = self.db.get_conversation_history(message.sender, self.config.signal_number, limit=20)
-                context = build_context(history, message.content)
+                logger.debug("Got %d history messages", len(history))
 
-                # Stream and send response
-                await self._stream_and_send_response(message.sender, context)
+                # Run agentic loop to get final answer
+                logger.info("Running agentic controller...")
+                answer = await self.controller.run(history, message.content)
+                logger.info("Controller returned answer: %s", answer[:100] if answer else "EMPTY")
+
+                # Ensure we have a non-empty, non-whitespace answer
+                if not answer or not answer.strip():
+                    logger.error("Controller returned empty/whitespace answer!")
+                    answer = "Sorry, I couldn't generate a response."
+
+                # Send the final answer
+                await self.channel.send_message(message.sender, answer)
+
+                # Log to database
+                self.db.log_message("outgoing", self.config.signal_number, message.sender, answer)
+
+            except Exception as e:
+                logger.exception("Error in message handling: %s", e)
+                error_msg = "Sorry, I encountered an error processing your message."
+                await self.channel.send_message(message.sender, error_msg)
+                self.db.log_message("outgoing", self.config.signal_number, message.sender, error_msg)
+
             finally:
                 # Always stop typing indicator
                 await self.channel.send_typing(message.sender, False)
@@ -187,7 +184,7 @@ async def main() -> None:
     """Main entry point."""
     # Load configuration
     config = Config.load()
-    setup_logging(config.log_level)
+    setup_logging(config.log_level, config.log_file)
 
     # Create and run agent
     agent = PennyAgent(config)
