@@ -14,7 +14,7 @@ from penny.channels import MessageChannel, SignalChannel
 from penny.config import Config, setup_logging
 from penny.memory import Database
 from penny.ollama import OllamaClient
-from penny.tools import GetCurrentTimeTool, ToolRegistry
+from penny.tools import GetCurrentTimeTool, StoreMemoryTool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +35,13 @@ class PennyAgent:
         # Initialize tools
         self.tool_registry = ToolRegistry()
         self.tool_registry.register(GetCurrentTimeTool())
+        self.tool_registry.register(StoreMemoryTool(db=self.db))
 
         # Initialize agentic controller
         self.controller = AgenticController(
             ollama_client=self.ollama_client,
             tool_registry=self.tool_registry,
+            db=self.db,
             max_steps=5,
         )
 
@@ -81,20 +83,28 @@ class PennyAgent:
                 logger.debug("Got %d history messages", len(history))
 
                 # Run agentic loop to get final answer
-                logger.info("Running agentic controller...")
-                answer = await self.controller.run(history, message.content)
-                logger.info("Controller returned answer: %s", answer[:100] if answer else "EMPTY")
+                answer, thinking = await self.controller.run(history, message.content)
+                logger.info("Received from controller - answer length: %d, thinking: %s",
+                           len(answer) if answer else 0,
+                           "present" if thinking else "None")
 
-                # Ensure we have a non-empty, non-whitespace answer
+                # Ensure we have a non-empty answer
                 if not answer or not answer.strip():
-                    logger.error("Controller returned empty/whitespace answer!")
                     answer = "Sorry, I couldn't generate a response."
 
-                # Send the final answer
-                await self.channel.send_message(message.sender, answer)
-
-                # Log to database
-                self.db.log_message("outgoing", self.config.signal_number, message.sender, answer)
+                # Split answer by newlines and send each line separately
+                lines = [line.strip() for line in answer.split('\n') if line.strip()]
+                for idx, line in enumerate(lines):
+                    await self.channel.send_message(message.sender, line)
+                    # Log each line to database, but only include thinking on the first one
+                    self.db.log_message(
+                        "outgoing",
+                        self.config.signal_number,
+                        message.sender,
+                        line,
+                        chunk_index=idx,
+                        thinking=thinking if idx == 0 else None,
+                    )
 
             except Exception as e:
                 logger.exception("Error in message handling: %s", e)

@@ -17,6 +17,7 @@ class AgenticController:
         self,
         ollama_client: OllamaClient,
         tool_registry: ToolRegistry,
+        db,
         max_steps: int = 5,
     ):
         """
@@ -25,10 +26,12 @@ class AgenticController:
         Args:
             ollama_client: Ollama client for LLM calls
             tool_registry: Registry of available tools
+            db: Database instance for retrieving memories
             max_steps: Maximum agentic steps before forcing answer
         """
         self.ollama = ollama_client
         self.tool_registry = tool_registry
+        self.db = db
         self.tool_executor = ToolExecutor(tool_registry)
         self.max_steps = max_steps
 
@@ -45,6 +48,12 @@ class AgenticController:
         """
         messages = []
 
+        # Add system message with long-term memories (if any exist)
+        memories = self.db.get_all_memories()
+        if memories:
+            memory_text = "Long-term memories:\n" + "\n".join(f"- {m.content}" for m in memories)
+            messages.append({"role": "system", "content": memory_text})
+
         # Add history
         for msg in history:
             role = "user" if msg.direction == "incoming" else "assistant"
@@ -58,7 +67,7 @@ class AgenticController:
         logger.debug("Built %d messages from history", len(messages))
         return messages
 
-    async def run(self, history: list, current_message: str) -> str:
+    async def run(self, history: list, current_message: str) -> tuple[str, str | None]:
         """
         Run the agentic loop with tool calling.
 
@@ -67,7 +76,7 @@ class AgenticController:
             current_message: Current user message
 
         Returns:
-            Final answer string
+            Tuple of (final answer string, thinking text or None)
         """
         # Build messages
         messages = self._build_messages(history, current_message)
@@ -85,19 +94,20 @@ class AgenticController:
                 response = await self.ollama.chat(messages=messages, tools=tools)
             except Exception as e:
                 logger.error("Error calling Ollama: %s", e)
-                return "Sorry, I encountered an error communicating with the model."
+                return "Sorry, I encountered an error communicating with the model.", None
 
             message = response.get("message", {})
 
-            # Check for tool calls
-            if "tool_calls" in message:
-                logger.info("Model requested %d tool call(s)", len(message["tool_calls"]))
+            # Check for tool calls (handle None values)
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                logger.info("Model requested %d tool call(s)", len(tool_calls))
 
                 # Add assistant message to history
                 messages.append(message)
 
                 # Execute each tool call
-                for ollama_tool_call in message["tool_calls"]:
+                for ollama_tool_call in tool_calls:
                     function = ollama_tool_call.get("function", {})
                     tool_name = function.get("name", "")
                     arguments = function.get("arguments", {})
@@ -129,11 +139,24 @@ class AgenticController:
 
             if not content:
                 logger.error("Model returned empty content!")
-                return "Sorry, the model generated an empty response."
+                return "Sorry, the model generated an empty response.", None
+
+            # Extract thinking if present - check multiple possible locations
+            thinking = (
+                response.get("thinking")  # Top level in response
+                or message.get("thinking")  # Inside message object
+                or message.get("reasoning")  # Alternative field name
+            )
+
+            if thinking:
+                logger.info("Extracted thinking text (length: %d)", len(thinking))
+            else:
+                logger.debug("No thinking text found. Response keys: %s, Message keys: %s",
+                           list(response.keys()), list(message.keys()))
 
             logger.info("Got final answer (length: %d)", len(content))
-            return content
+            return content, thinking
 
         # Max steps reached
         logger.warning("Max steps reached without final answer")
-        return "Sorry, I couldn't complete that request within the allowed steps."
+        return "Sorry, I couldn't complete that request within the allowed steps.", None

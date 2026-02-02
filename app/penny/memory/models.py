@@ -17,3 +17,11 @@ class Message(SQLModel, table=True):
     content: str
     chunk_index: Optional[int] = Field(default=None)  # For streaming chunks
     thinking: Optional[str] = Field(default=None)  # LLM reasoning for thinking models
+
+
+class Memory(SQLModel, table=True):
+    """Long-term memory storage for facts, preferences, and rules."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    content: str = Field(index=True)  # The memory text
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)

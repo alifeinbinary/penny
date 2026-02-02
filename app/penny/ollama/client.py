@@ -53,22 +53,38 @@ class OllamaClient:
                 tools=tools,
             )
 
-            logger.debug("Raw Ollama response: %s", response)
+            # Convert response to dict if it's not already
+            if hasattr(response, 'model_dump'):
+                response_dict = response.model_dump()
+            elif hasattr(response, '__dict__'):
+                response_dict = dict(response)
+            else:
+                response_dict = dict(response)
+
+            logger.debug("Raw Ollama response type: %s", type(response))
+            logger.debug("Response keys: %s", list(response_dict.keys()) if isinstance(response_dict, dict) else "not a dict")
 
             # Extract message from response
-            message = response.get("message", {})
+            message = response_dict.get("message", {})
 
-            # Log tool calls if present
-            if "tool_calls" in message:
-                logger.info("Received %d tool call(s)", len(message["tool_calls"]))
-                for tc in message["tool_calls"]:
+            # Log tool calls if present (check for both existence and non-None)
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                logger.info("Received %d tool call(s)", len(tool_calls))
+                for tc in tool_calls:
                     logger.debug("Tool call: %s", tc)
 
             # Log thinking if present
-            if "thinking" in response:
-                logger.debug("Model thinking: %s", response["thinking"][:200])
+            thinking = response_dict.get("thinking")
+            if thinking:
+                logger.debug("Model thinking: %s", thinking[:200])
 
-            return response
+            # Check message for thinking too
+            message_thinking = message.get("thinking")
+            if message_thinking:
+                logger.debug("Message thinking: %s", message_thinking[:200])
+
+            return response_dict
 
         except Exception as e:
             logger.exception("Ollama chat error: %s", e)
