@@ -1,6 +1,0 @@
-{
-  "description": "Claude settings for this project",
-  "model": "sonnet",
-  "customInstructions": "",
-  "alwaysAllow": []
-}
