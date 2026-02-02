@@ -98,3 +98,34 @@ class Database:
                 logger.debug("Logged %s message: %s -> %s", direction, sender, recipient)
         except Exception as e:
             logger.error("Failed to log message: %s", e)
+
+    def store_memory(self, content: str) -> None:
+        """
+        Store a long-term memory.
+
+        Args:
+            content: The memory content to store
+        """
+        from penny.memory.models import Memory
+
+        try:
+            with self.get_session() as session:
+                memory = Memory(content=content)
+                session.add(memory)
+                session.commit()
+                logger.info("Stored memory: %s", content[:50])
+        except Exception as e:
+            logger.error("Failed to store memory: %s", e)
+
+    def get_all_memories(self) -> list:
+        """
+        Get all stored memories.
+
+        Returns:
+            List of Memory objects, ordered by creation time
+        """
+        from penny.memory.models import Memory
+
+        with self.get_session() as session:
+            memories = session.query(Memory).order_by(Memory.created_at).all()
+            return list(memories)
