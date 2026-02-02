@@ -190,6 +190,47 @@ class PennyAgent:
         except Exception as e:
             logger.exception("Error during history compactification: %s", e)
 
+    async def _compactify_memories(self) -> None:
+        """
+        Summarize all memories into a single compact memory.
+        Called during idle time when multiple memories exist.
+        """
+        try:
+            memories = self.db.get_all_memories()
+
+            if len(memories) <= 1:
+                logger.debug("Only %d memory, no compactification needed", len(memories))
+                return
+
+            logger.info("Starting memory compactification (%d memories)...", len(memories))
+
+            # Build text representation of all memories
+            memories_text = "Current memories:\n\n"
+            for memory in memories:
+                memories_text += f"- {memory.content}\n"
+
+            # Create summarization prompt
+            summary_prompt = f"{SystemPrompts.MEMORY_SUMMARIZATION}\n\n{memories_text}"
+
+            # Use Ollama to generate summary
+            messages = [
+                ChatMessage(role=MessageRole.USER, content=summary_prompt).to_dict()
+            ]
+
+            response_dict = await self.ollama_client.chat(messages=messages, tools=[])
+            response = ChatResponse(**response_dict)
+            summary = response.content.strip()
+
+            if summary:
+                # Replace all memories with summary
+                self.db.compact_memories(summary)
+                logger.info("Memory compactification completed, %d memories -> 1 summary", len(memories))
+            else:
+                logger.warning("Failed to generate memory summary")
+
+        except Exception as e:
+            logger.exception("Error during memory compactification: %s", e)
+
     async def handle_message(self, envelope_data: dict) -> None:
         """
         Process an incoming message from the channel.
@@ -218,19 +259,20 @@ class PennyAgent:
                 self.last_message_time = time.time()
                 self.messages_since_compaction += 1
 
+                # Get conversation history BEFORE logging current message
+                # (controller will append current message, so we don't want it in history yet)
+                history = self.db.get_conversation_history(
+                    message.sender,
+                    self.config.signal_number,
+                    limit=self.config.conversation_history_limit,
+                )
+
                 # Log incoming message
                 self.db.log_message(
                     MessageDirection.INCOMING.value,
                     message.sender,
                     self.config.signal_number,
                     message.content,
-                )
-
-                # Get conversation history
-                history = self.db.get_conversation_history(
-                    message.sender,
-                    self.config.signal_number,
-                    limit=self.config.conversation_history_limit,
                 )
 
                 # Run agentic loop using message controller (only has store_memory and create_task)
@@ -372,10 +414,9 @@ class PennyAgent:
 
                                     # Create a prompt from system perspective that includes the task result
                                     # This gets added as a USER message, so frame it as system info
-                                    completion_prompt = (
-                                        f"[SYSTEM: You completed the background task '{completed_task.content}'. "
-                                        f"Your findings: {completed_task.result}. "
-                                        f"Now respond to the user with this information in a natural way.]"
+                                    completion_prompt = SystemPrompts.TASK_COMPLETION.format(
+                                        task_content=completed_task.content,
+                                        task_result=completed_task.result,
                                     )
 
                                     # Refresh typing indicator at each step
@@ -401,19 +442,22 @@ class PennyAgent:
                             # Send error message and stop typing indicator
                             await self._send_response(task.requester, ErrorMessages.PROCESSING_ERROR)
                     else:
-                        # No pending tasks - check if we should compactify history
-                        # Only compactify if:
-                        # 1. Been idle long enough
-                        # 2. Enough new messages since last compaction (configurable)
-                        # 3. Haven't compacted too recently (avoid repeated compaction)
-                        time_since_compaction = time.time() - self.last_compaction_time
-                        enough_new_messages = self.messages_since_compaction >= self.config.history_compaction_min_new_messages
+                        # No pending tasks - check if we should compactify
 
-                        if (idle_time >= self.config.history_compaction_idle_seconds
-                            and enough_new_messages
+                        # Memory compactification: if multiple memories exist, compact them
+                        memories = self.db.get_all_memories()
+                        if len(memories) > 1 and idle_time >= self.config.history_compaction_idle_seconds:
+                            logger.info("Dormant for %.0f seconds, compactifying %d memories", idle_time, len(memories))
+                            await self._compactify_memories()
+
+                        # History compactification: after configured new messages
+                        time_since_compaction = time.time() - self.last_compaction_time
+
+                        if (self.messages_since_compaction >= self.config.history_compaction_min_new_messages
+                            and idle_time >= self.config.history_compaction_idle_seconds
                             and time_since_compaction >= self.config.history_compaction_idle_seconds):
-                            logger.info("Dormant for %.0f seconds with no tasks, compactifying history (%d new messages)",
-                                      idle_time, self.messages_since_compaction)
+                            logger.info("Dormant for %.0f seconds with %d+ messages, compactifying history",
+                                      idle_time, self.config.history_compaction_min_new_messages)
                             await self._compactify_history()
                             self.last_compaction_time = time.time()
                             self.messages_since_compaction = 0
