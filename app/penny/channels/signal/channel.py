@@ -120,7 +120,13 @@ class SignalChannel(MessageChannel):
             logger.debug("Ignoring empty message from %s", sender)
             return None
 
-        return IncomingMessage(sender=sender, content=content)
+        # Extract quoted text if this is a reply
+        quoted_text = None
+        if envelope.envelope.dataMessage.quote and envelope.envelope.dataMessage.quote.text:
+            quoted_text = envelope.envelope.dataMessage.quote.text
+            logger.info("Message includes quote: '%s'", quoted_text[:100])
+
+        return IncomingMessage(sender=sender, content=content, quoted_text=quoted_text)
 
     def _parse_envelope(self, envelope_data: dict) -> SignalEnvelope | None:
         """Parse a Signal WebSocket envelope."""
