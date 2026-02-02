@@ -17,7 +17,7 @@ from penny.channels import MessageChannel, SignalChannel
 from penny.config import Config, setup_logging
 from penny.constants import ErrorMessages, SystemPrompts
 from penny.memory import Database
-from penny.memory.models import MessageDirection
+from penny.memory.models import MessageDirection, Task, TaskStatus
 from penny.ollama import OllamaClient
 from penny.ollama.models import ChatResponse
 from penny.tools import (
@@ -234,10 +234,15 @@ class PennyAgent:
                 )
 
                 # Run agentic loop using message controller (only has store_memory and create_task)
+                # Refresh typing indicator at each step
+                async def refresh_typing(_step: int):
+                    await self.channel.send_typing(message.sender, True)
+
                 response = await self.message_controller.run(
                     history,
                     message.content,
                     system_prompt=SystemPrompts.MESSAGE_HANDLER,
+                    on_step=refresh_typing,
                 )
 
                 # Get answer with fallback
@@ -325,6 +330,9 @@ class PennyAgent:
                         task = pending_tasks[0]
                         logger.info("Processing task %d: %s", task.id, task.content[:50])
 
+                        # Start typing indicator before entering agentic loop
+                        await self.channel.send_typing(task.requester, True)
+
                         try:
                             # Get requester's conversation history for full context
                             history = self.db.get_conversation_history(
@@ -335,16 +343,19 @@ class PennyAgent:
 
                             # Run task controller with full context (history + memories)
                             # Include task ID so it can complete the task
+                            # Refresh typing indicator at each step
+                            async def refresh_typing(_step: int):
+                                await self.channel.send_typing(task.requester, True)
+
                             task_prompt = f"Task ID {task.id}: {task.content}"
                             await self.task_controller.run(
                                 history,
                                 task_prompt,
                                 system_prompt=SystemPrompts.TASK_PROCESSOR,
+                                on_step=refresh_typing,
                             )
 
                             # Check if task was completed
-                            from penny.memory.models import Task, TaskStatus
-
                             with self.db.get_session() as session:
                                 completed_task = session.get(Task, task.id)
 
@@ -367,19 +378,28 @@ class PennyAgent:
                                         f"Now respond to the user with this information in a natural way.]"
                                     )
 
+                                    # Refresh typing indicator at each step
+                                    async def refresh_final_typing(_step: int):
+                                        await self.channel.send_typing(task.requester, True)
+
                                     final_response = await self.message_controller.run(
                                         final_history,
                                         completion_prompt,
                                         system_prompt=None,  # Use default system prompt
+                                        on_step=refresh_final_typing,
                                     )
 
                                     answer = final_response.answer.strip() if final_response.answer else completed_task.result
                                     await self._send_response(task.requester, answer, final_response.thinking)
                                 else:
                                     logger.warning("Task %d did not complete", task.id)
+                                    # Stop typing indicator if task didn't complete
+                                    await self.channel.send_typing(task.requester, False)
 
                         except Exception as e:
                             logger.exception("Error processing task %d: %s", task.id, e)
+                            # Send error message and stop typing indicator
+                            await self._send_response(task.requester, ErrorMessages.PROCESSING_ERROR)
                     else:
                         # No pending tasks - check if we should compactify history
                         # Only compactify if:

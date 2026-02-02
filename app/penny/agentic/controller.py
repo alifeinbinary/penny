@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Callable
 
 from penny.agentic.models import ChatMessage, ControllerResponse, MessageRole
 from penny.agentic.tool_executor import ToolExecutor
@@ -80,7 +81,11 @@ class AgenticController:
         return messages
 
     async def run(
-        self, history: list, current_message: str, system_prompt: str | None = None
+        self,
+        history: list,
+        current_message: str,
+        system_prompt: str | None = None,
+        on_step: Callable | None = None,
     ) -> ControllerResponse:
         """
         Run the agentic loop with tool calling.
@@ -89,6 +94,7 @@ class AgenticController:
             history: Conversation history (Message objects)
             current_message: Current user message
             system_prompt: Optional system prompt for special instructions
+            on_step: Optional callback called at the start of each iteration
 
         Returns:
             ControllerResponse with answer and optional thinking
@@ -103,6 +109,10 @@ class AgenticController:
         # Agentic loop
         for step in range(self.max_steps):
             logger.info("Agentic step %d/%d", step + 1, self.max_steps)
+
+            # Call step callback if provided (e.g., to refresh typing indicator)
+            if on_step:
+                await on_step(step)
 
             # Get model response
             try:
