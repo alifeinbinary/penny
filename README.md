@@ -123,6 +123,7 @@ Penny automatically manages conversation context to maintain long-term coherence
 - `HISTORY_COMPACTION_LIMIT`: Messages to summarize (default: 500)
 - `HISTORY_COMPACTION_IDLE_SECONDS`: Idle time before compacting (default: 30.0)
 - `HISTORY_COMPACTION_MIN_MESSAGES`: Minimum messages needed (default: 10)
+- `HISTORY_COMPACTION_MIN_NEW_MESSAGES`: Minimum new messages since last compaction (default: 10)
 
 ### Background Task Processing
 
@@ -233,6 +234,7 @@ CONVERSATION_HISTORY_LIMIT=100
 HISTORY_COMPACTION_LIMIT=500
 HISTORY_COMPACTION_IDLE_SECONDS=30.0
 HISTORY_COMPACTION_MIN_MESSAGES=10
+HISTORY_COMPACTION_MIN_NEW_MESSAGES=10
 ```
 
 **Configuration Options:**
@@ -258,6 +260,7 @@ HISTORY_COMPACTION_MIN_MESSAGES=10
 - `HISTORY_COMPACTION_LIMIT`: Messages to summarize during compaction (default: 500)
 - `HISTORY_COMPACTION_IDLE_SECONDS`: Idle time before compacting history (default: 30.0)
 - `HISTORY_COMPACTION_MIN_MESSAGES`: Minimum messages required to compact (default: 10)
+- `HISTORY_COMPACTION_MIN_NEW_MESSAGES`: Minimum new messages since last compaction (default: 10)
 
 ## Development Roadmap
 

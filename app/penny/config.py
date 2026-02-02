@@ -41,6 +41,7 @@ class Config:
     history_compaction_limit: int = 500
     history_compaction_idle_seconds: float = 30.0
     history_compaction_min_messages: int = 10
+    history_compaction_min_new_messages: int = 10
 
     @classmethod
     def load(cls) -> "Config":
