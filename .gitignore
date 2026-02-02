@@ -40,3 +40,7 @@ Thumbs.db
 # uv
 .uv/
 uv.lock
+
+# claude
+.claude/
+CLAUDE.md
