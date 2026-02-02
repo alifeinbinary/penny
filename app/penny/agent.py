@@ -15,7 +15,8 @@ from penny.channels import MessageChannel, SignalChannel
 from penny.config import Config, setup_logging
 from penny.memory import Database
 from penny.ollama import OllamaClient
-from penny.constants import SUMMARIZE_PROMPT, SYSTEM_PROMPT
+from penny.agentic.models import MessageRole
+from penny.constants import SUMMARIZE_PROMPT, SYSTEM_PROMPT, MessageDirection
 from penny.tools import PerplexitySearchTool, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ class PennyAgent:
                 parent_id, history = self.db.get_thread_context(message.quoted_text)
 
             # Log incoming message linked to parent
-            incoming_id = self.db.log_message("incoming", message.sender, message.content, parent_id=parent_id)
+            incoming_id = self.db.log_message(MessageDirection.INCOMING, message.sender, message.content, parent_id=parent_id)
 
             await self.channel.send_typing(message.sender, True)
             try:
@@ -82,10 +83,11 @@ class PennyAgent:
                     current_message=message.content,
                     system_prompt=SYSTEM_PROMPT,
                     history=history,
+                    on_step=lambda _: self.channel.send_typing(message.sender, True),
                 )
 
                 answer = response.answer.strip() if response.answer else "Sorry, I couldn't generate a response."
-                self.db.log_message("outgoing", self.config.signal_number, answer, parent_id=incoming_id)
+                self.db.log_message(MessageDirection.OUTGOING, self.config.signal_number, answer, parent_id=incoming_id)
                 await self.channel.send_message(message.sender, answer)
             finally:
                 await self.channel.send_typing(message.sender, False)
@@ -172,7 +174,7 @@ class PennyAgent:
 
                 # Format thread for summarization
                 thread_text = "\n".join(
-                    f"{'user' if m.direction == 'incoming' else 'assistant'}: {m.content}"
+                    f"{MessageRole.USER if m.direction == MessageDirection.INCOMING else MessageRole.ASSISTANT}: {m.content}"
                     for m in thread
                 )
 
