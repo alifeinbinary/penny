@@ -36,6 +36,10 @@ class Config:
     message_max_steps: int = 5
     summarize_idle_seconds: float = 30.0
 
+    # Ollama retry configuration
+    ollama_max_retries: int = 3
+    ollama_retry_delay: float = 0.5
+
     @classmethod
     def load(cls) -> "Config":
         """Load configuration from .env file."""

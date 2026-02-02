@@ -10,8 +10,8 @@ from typing import Any
 
 import websockets
 
-from penny.agentic import AgenticController
-from penny.agentic.models import MessageRole
+from penny.agent import AgentController
+from penny.agent.models import MessageRole
 from penny.channels import MessageChannel, SignalChannel
 from penny.config import Config, setup_logging
 from penny.constants import SUMMARIZE_PROMPT, SYSTEM_PROMPT, MessageDirection
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class PennyAgent:
-    """AI agent powered by Ollama via an agentic controller."""
+    """AI agent powered by Ollama via an agent controller."""
 
     def __init__(self, config: Config, channel: MessageChannel | None = None):
         """Initialize the agent with configuration."""
@@ -31,7 +31,13 @@ class PennyAgent:
         self.channel = channel or SignalChannel(config.signal_api_url, config.signal_number)
         self.db = Database(config.db_path)
         self.db.create_tables()
-        self.ollama_client = OllamaClient(config.ollama_api_url, config.ollama_model, db=self.db)
+        self.ollama_client = OllamaClient(
+            config.ollama_api_url,
+            config.ollama_model,
+            db=self.db,
+            max_retries=config.ollama_max_retries,
+            retry_delay=config.ollama_retry_delay,
+        )
 
         tool_registry = ToolRegistry()
         if config.perplexity_api_key:
@@ -42,7 +48,7 @@ class PennyAgent:
         else:
             logger.warning("No PERPLEXITY_API_KEY configured - agent will have no tools")
 
-        self.controller = AgenticController(
+        self.controller = AgentController(
             ollama_client=self.ollama_client,
             tool_registry=tool_registry,
             max_steps=config.message_max_steps,
@@ -60,7 +66,7 @@ class PennyAgent:
         self.running = False
 
     async def handle_message(self, envelope_data: dict) -> None:
-        """Process an incoming message through the agentic controller."""
+        """Process an incoming message through the agent controller."""
         try:
             self.last_message_time = time.monotonic()
 
