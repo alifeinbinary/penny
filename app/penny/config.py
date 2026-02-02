@@ -34,6 +34,7 @@ class Config:
 
     # Agent runtime configuration
     message_max_steps: int = 5
+    summarize_idle_seconds: float = 30.0
 
     @classmethod
     def load(cls) -> "Config":
