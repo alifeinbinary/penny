@@ -70,12 +70,25 @@ class ResponseLine(BaseModel):
     thinking: str | None = None
 
 
+class OllamaToolCallFunction(BaseModel):
+    """Function details within an Ollama tool call."""
+
+    name: str = ""
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class OllamaToolCall(BaseModel):
+    """A tool call from the Ollama chat response."""
+
+    function: OllamaToolCallFunction = Field(default_factory=OllamaToolCallFunction)
+
+
 class ChatResponseMessage(BaseModel):
     """Message object from chat response."""
 
     role: str
     content: str = ""
-    tool_calls: list[dict[str, Any]] | None = None
+    tool_calls: list[OllamaToolCall] | None = None
     thinking: str | None = None
 
     class Config:

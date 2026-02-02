@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from penny.agentic.models import MessageRole
+from penny.agent.models import MessageRole
 from penny.constants import MessageDirection
 from penny.database.models import MessageLog, PromptLog, SearchLog
 

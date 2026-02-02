@@ -1,6 +1,6 @@
 DC = docker-compose run --rm penny
 
-.PHONY: up kill fmt lint fix typecheck check ci
+.PHONY: up kill fmt lint fix typecheck check
 
 up:
 	docker-compose up --build
@@ -21,9 +21,7 @@ fix:
 typecheck:
 	$(DC) ty check penny/
 
-check: fmt lint typecheck
-
-ci:
+check:
 	$(DC) ruff format --check penny/
 	$(DC) ruff check penny/
 	$(DC) ty check penny/

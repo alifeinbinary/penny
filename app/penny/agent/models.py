@@ -1,4 +1,4 @@
-"""Pydantic models and enums for agentic loop."""
+"""Pydantic models and enums for agent loop."""
 
 from enum import Enum
 

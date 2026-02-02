@@ -17,7 +17,9 @@ You send a message on Signal. Penny searches the web via Perplexity and finds a 
 - **Image Attachments**: Every response includes a relevant image from DuckDuckGo, sent as a Signal attachment (degrades gracefully if unavailable)
 - **Thread-Based Context**: Quote-reply to continue a conversation; Penny walks the message chain to rebuild history
 - **Full Logging**: Every Ollama prompt, Perplexity search, and user/agent message is logged to SQLite
-- **Agentic Loop**: Multi-step reasoning with tool calling (up to 5 steps), with duplicate tool call protection
+- **Agent Loop**: Multi-step reasoning with tool calling (up to 5 steps), with duplicate tool call protection
+- **Search Result Cleaning**: Regex-based stripping of markdown and citations from Perplexity results before they reach the LLM
+- **Retry on Failure**: Ollama client retries up to 3 times on transient errors (e.g. malformed tool call JSON)
 
 ## Architecture
 
@@ -51,7 +53,7 @@ You send a message on Signal. Penny searches the web via Perplexity and finds a 
         │               │
         │  - Message    │
         │    Listener   │
-        │  - Agentic    │
+        │  - Agent    │
         │    Loop       │
         │  - Search     │
         │    (Perplexity│
@@ -66,7 +68,7 @@ You send a message on Signal. Penny searches the web via Perplexity and finds a 
 1. User sends Signal message (or quote-replies to a previous response)
 2. If quote-reply: look up the quoted message, walk the parent chain to build thread history
 3. Log incoming message (linked to parent if replying)
-4. Run agentic loop: Ollama calls search tool, which runs Perplexity (text) and DuckDuckGo (images) in parallel
+4. Run agent loop: Ollama calls search tool, which runs Perplexity (text) and DuckDuckGo (images) in parallel
 5. Log outgoing message (linked to incoming)
 6. Send response back via Signal with image attachment (if available)
 
@@ -160,7 +162,7 @@ MESSAGE_MAX_STEPS=5
 - `DB_PATH`: SQLite database location (default: /app/data/penny.db)
 - `LOG_FILE`: Log file path (default: none)
 - `PERPLEXITY_API_KEY`: API key for web search (without this, the agent has no tools)
-- `MESSAGE_MAX_STEPS`: Max agentic loop steps per message (default: 5)
+- `MESSAGE_MAX_STEPS`: Max agent loop steps per message (default: 5)
 
 ## Inspiration
 

@@ -1,5 +1,6 @@
 """Ollama API client for LLM inference."""
 
+import asyncio
 import logging
 import time
 
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 class OllamaClient:
     """Client for interacting with Ollama API using the official SDK."""
 
-    def __init__(self, api_url: str, model: str, db=None):
+    def __init__(self, api_url: str, model: str, db=None, *, max_retries: int, retry_delay: float):
         """
         Initialize Ollama client.
 
@@ -21,10 +22,14 @@ class OllamaClient:
             api_url: Base URL for Ollama API (e.g., http://localhost:11434)
             model: Model name to use (e.g., llama3.2)
             db: Optional Database instance for logging prompts
+            max_retries: Number of retry attempts on failure
+            retry_delay: Seconds between retries
         """
         self.api_url = api_url.rstrip("/")
         self.model = model
         self.db = db
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
         # Initialize the official Ollama client
         self.client = ollama.AsyncClient(host=api_url)
@@ -46,55 +51,61 @@ class OllamaClient:
         Returns:
             ChatResponse with message, thinking, tool calls, etc.
         """
-        try:
-            logger.debug("Sending chat request to Ollama")
+        last_error: Exception | None = None
 
-            start = time.time()
-
-            raw = await self.client.chat(
-                model=self.model,
-                messages=messages,
-                tools=tools,
-            )
-
-            duration_ms = int((time.time() - start) * 1000)
-
-            # Convert raw response to dict then parse with pydantic
-            if hasattr(raw, "model_dump"):
-                raw_dict = raw.model_dump()
-            elif hasattr(raw, "__dict__"):
-                raw_dict = dict(raw)
-            else:
-                raw_dict = dict(raw)
-
-            response = ChatResponse(**raw_dict)
-
-            # Extract thinking from either top-level or message
-            thinking = response.thinking or response.message.thinking
-
-            if response.has_tool_calls:
-                logger.info("Received %d tool call(s)", len(response.message.tool_calls or []))
-            if thinking:
-                logger.debug("Model thinking: %s", thinking[:200])
-
-            logger.debug("Response content length: %d", len(response.content))
-
-            # Log to database
-            if self.db:
-                self.db.log_prompt(
-                    model=self.model,
-                    messages=messages,
-                    response=raw_dict,
-                    tools=tools,
-                    thinking=thinking,
-                    duration_ms=duration_ms,
+        for attempt in range(self.max_retries):
+            try:
+                logger.debug(
+                    "Sending chat request to Ollama (attempt %d/%d)", attempt + 1, self.max_retries
                 )
 
-            return response
+                start = time.time()
 
-        except Exception as e:
-            logger.exception("Ollama chat error: %s", e)
-            raise
+                raw = await self.client.chat(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools,
+                )
+
+                duration_ms = int((time.time() - start) * 1000)
+
+                raw_dict = raw.model_dump()
+
+                response = ChatResponse(**raw_dict)
+
+                # Extract thinking from either top-level or message
+                thinking = response.thinking or response.message.thinking
+
+                if response.has_tool_calls:
+                    logger.info("Received %d tool call(s)", len(response.message.tool_calls or []))
+                if thinking:
+                    logger.debug("Model thinking: %s", thinking[:200])
+
+                logger.debug("Response content length: %d", len(response.content))
+
+                # Log to database
+                if self.db:
+                    self.db.log_prompt(
+                        model=self.model,
+                        messages=messages,
+                        response=raw_dict,
+                        tools=tools,
+                        thinking=thinking,
+                        duration_ms=duration_ms,
+                    )
+
+                return response
+
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Ollama chat error (attempt %d/%d): %s", attempt + 1, self.max_retries, e
+                )
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+
+        logger.error("Ollama chat failed after %d attempts: %s", self.max_retries, last_error)
+        raise last_error  # type: ignore[misc]
 
     async def generate(self, prompt: str, tools: list[dict] | None = None) -> ChatResponse:
         """

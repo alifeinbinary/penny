@@ -1,10 +1,11 @@
-"""Agentic controller loop using Ollama SDK."""
+"""Agent controller loop using Ollama SDK."""
 
 import logging
+import re
 from collections.abc import Callable
 
-from penny.agentic.models import ChatMessage, ControllerResponse, MessageRole
-from penny.agentic.tool_executor import ToolExecutor
+from penny.agent.models import ChatMessage, ControllerResponse, MessageRole
+from penny.agent.tool_executor import ToolExecutor
 from penny.ollama import OllamaClient
 from penny.tools import ToolCall, ToolRegistry
 from penny.tools.models import SearchResult
@@ -12,8 +13,8 @@ from penny.tools.models import SearchResult
 logger = logging.getLogger(__name__)
 
 
-class AgenticController:
-    """Controls the agentic loop with native Ollama tool calling."""
+class AgentController:
+    """Controls the agent loop with native Ollama tool calling."""
 
     def __init__(
         self,
@@ -27,12 +28,28 @@ class AgenticController:
         Args:
             ollama_client: Ollama client for LLM calls
             tool_registry: Registry of available tools
-            max_steps: Maximum agentic steps before forcing answer
+            max_steps: Maximum agent steps before forcing answer
         """
         self.ollama = ollama_client
         self.tool_registry = tool_registry
         self.tool_executor = ToolExecutor(tool_registry)
         self.max_steps = max_steps
+
+    @staticmethod
+    def _clean_search_results(raw_text: str) -> str:
+        """Strip markdown formatting and citations from raw search results."""
+        text = raw_text
+        # Remove citations like [web:1], [page:2], [conversation_history:0]
+        text = re.sub(r"\[[\w:]+(?::\d+)?\]", "", text)
+        # Remove markdown headings
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+        # Remove markdown bold/italic
+        text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
+        # Remove markdown bullet points
+        text = re.sub(r"^[-*]\s+", "", text, flags=re.MULTILINE)
+        # Collapse multiple blank lines
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     def _build_messages(
         self,
@@ -72,7 +89,7 @@ class AgenticController:
         on_step: Callable | None = None,
     ) -> ControllerResponse:
         """
-        Run the agentic loop with tool calling.
+        Run the agent loop with tool calling.
 
         Args:
             current_message: Current user message
@@ -95,9 +112,9 @@ class AgenticController:
         # Track tools that have been called to prevent repeat loops
         called_tools: set[str] = set()
 
-        # Agentic loop
+        # Agent loop
         for step in range(self.max_steps):
-            logger.info("Agentic step %d/%d", step + 1, self.max_steps)
+            logger.info("Agent step %d/%d", step + 1, self.max_steps)
 
             # Call step callback if provided (e.g., to refresh typing indicator)
             if on_step:
@@ -123,9 +140,8 @@ class AgenticController:
 
                 # Execute each tool call
                 for ollama_tool_call in response.message.tool_calls or []:
-                    function = ollama_tool_call.get("function", {})
-                    tool_name = function.get("name", "")
-                    arguments = function.get("arguments", {})
+                    tool_name = ollama_tool_call.function.name
+                    arguments = ollama_tool_call.function.arguments
 
                     # Skip tools that have already been called
                     if tool_name in called_tools:
@@ -147,7 +163,7 @@ class AgenticController:
                     if tool_result.error:
                         result_str = f"Error: {tool_result.error}"
                     elif isinstance(tool_result.result, SearchResult):
-                        result_str = tool_result.result.text
+                        result_str = self._clean_search_results(tool_result.result.text)
                         if tool_result.result.image_base64:
                             attachments.append(tool_result.result.image_base64)
                     else:
