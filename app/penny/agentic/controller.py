@@ -65,17 +65,19 @@ class AgenticController:
                 ChatMessage(role=MessageRole.SYSTEM, content=memory_text).to_dict()
             )
 
-        # Add history
+        # Add history (already stitched by database layer)
         for msg in history:
             role = MessageRole.USER if msg.direction == "incoming" else MessageRole.ASSISTANT
-            # Only add first chunk to avoid duplication
-            if msg.chunk_index is None or msg.chunk_index == 0:
-                messages.append(ChatMessage(role=role, content=msg.content).to_dict())
+            messages.append(ChatMessage(role=role, content=msg.content).to_dict())
 
-        # Add current message
-        messages.append(
-            ChatMessage(role=MessageRole.USER, content=current_message).to_dict()
-        )
+        # Add current message (only if not already in history to avoid duplicates)
+        # Check if the last message in history is the same as current message
+        if not messages or messages[-1]["content"] != current_message:
+            messages.append(
+                ChatMessage(role=MessageRole.USER, content=current_message).to_dict()
+            )
+        else:
+            logger.debug("Skipping duplicate current message already in history")
 
         logger.debug("Built %d messages from history", len(messages))
         return messages

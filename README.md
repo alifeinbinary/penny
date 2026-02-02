@@ -102,19 +102,25 @@ Penny uses a **dual-context system** with separate tool registries:
 
 ## Key Features
 
-### Automatic History Compactification
+### Automatic Compactification
 
-Penny automatically manages conversation context to maintain long-term coherence without overwhelming the LLM's context window:
+Penny automatically manages both conversation history and memories to maintain long-term coherence without overwhelming the LLM's context window:
 
-**How it works:**
-1. After being idle for 30 seconds (configurable) with no pending tasks
+**History Compactification:**
+1. Triggered after 10 new messages and 30 seconds of idle time (configurable)
 2. Retrieves the last 500 messages (configurable) from the conversation
 3. Sends them to Ollama with a summarization prompt
 4. Stores the summary (3-5 paragraphs) as a special message: `[CONVERSATION_SUMMARY YYYY-MM-DD HH:MM]`
-5. Summary gets included in future conversation context alongside recent messages
+5. Summary gets included in future conversation context alongside recent 10 turns
+
+**Memory Compactification:**
+1. Triggered when multiple memories exist during idle time
+2. Consolidates all memories into a single compact summary
+3. Removes redundancy while preserving all important facts and preferences
+4. Replaces N memories with 1 summary memory
 
 **Benefits:**
-- Maintains context from hundreds of messages in just a few paragraphs
+- Maintains context with minimal token usage (10 turns + summaries)
 - Preserves key facts, preferences, and conversation flow
 - Automatic cooldown prevents repeated summarization
 - No manual intervention required
@@ -230,7 +236,7 @@ MESSAGE_MAX_STEPS=5
 TASK_MAX_STEPS=10
 IDLE_TIMEOUT_SECONDS=5.0
 TASK_CHECK_INTERVAL=1.0
-CONVERSATION_HISTORY_LIMIT=100
+CONVERSATION_HISTORY_LIMIT=10  # Conversation turns (not individual chunks)
 HISTORY_COMPACTION_LIMIT=500
 HISTORY_COMPACTION_IDLE_SECONDS=30.0
 HISTORY_COMPACTION_MIN_MESSAGES=10
@@ -256,7 +262,7 @@ HISTORY_COMPACTION_MIN_NEW_MESSAGES=10
 - `TASK_MAX_STEPS`: Max agentic loop steps for background tasks (default: 10)
 - `IDLE_TIMEOUT_SECONDS`: Idle time before processing tasks (default: 5.0)
 - `TASK_CHECK_INTERVAL`: How often to check for tasks (default: 1.0)
-- `CONVERSATION_HISTORY_LIMIT`: Recent messages for context (default: 100)
+- `CONVERSATION_HISTORY_LIMIT`: Recent conversation turns for context (default: 10, chunks stitched together)
 - `HISTORY_COMPACTION_LIMIT`: Messages to summarize during compaction (default: 500)
 - `HISTORY_COMPACTION_IDLE_SECONDS`: Idle time before compacting history (default: 30.0)
 - `HISTORY_COMPACTION_MIN_MESSAGES`: Minimum messages required to compact (default: 10)
@@ -268,7 +274,7 @@ HISTORY_COMPACTION_MIN_NEW_MESSAGES=10
 - [x] Core agent loop with WebSocket message handling
 - [x] SQLite message logging (incoming/outgoing with chunks)
 - [x] Ollama integration with tool calling support
-- [x] Conversation context (100 recent messages)
+- [x] Conversation context (10 turns with chunk stitching + compactification for long-term)
 - [x] Docker containerization
 - [x] Error handling and reconnection logic
 - [x] Tool-based architecture with ToolRegistry

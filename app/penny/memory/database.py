@@ -1,9 +1,13 @@
 """Database connection and session management."""
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine
+
+from penny.constants import DatabaseConstants
+from penny.memory.models import Memory, Message, Task, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -40,26 +44,63 @@ class Database:
     def get_conversation_history(self, sender: str, recipient: str, limit: int = 20) -> list:
         """
         Get recent conversation history between sender and recipient.
+        Groups chunked messages into single conversation turns.
 
         Args:
             sender: Phone number of sender
             recipient: Phone number of recipient
-            limit: Maximum number of messages to retrieve
+            limit: Maximum number of conversation turns to retrieve
 
         Returns:
-            List of Message objects, ordered by timestamp (oldest first)
+            List of Message objects (with chunks stitched together), ordered by timestamp (oldest first)
         """
-        from penny.memory.models import Message
-
         with self.get_session() as session:
-            # Get messages where either party is sender or recipient
+            # Get more messages than limit to ensure we have enough after grouping
+            # Fetch limit * multiplier to account for multi-chunk messages
             messages = session.query(Message).filter(
                 ((Message.sender == sender) & (Message.recipient == recipient))
                 | ((Message.sender == recipient) & (Message.recipient == sender))
-            ).order_by(Message.timestamp.desc()).limit(limit).all()
+            ).order_by(Message.timestamp.desc()).limit(limit * DatabaseConstants.MESSAGE_FETCH_MULTIPLIER).all()
 
             # Reverse to get chronological order (oldest first)
-            return list(reversed(messages))
+            messages = list(reversed(messages))
+
+            # Group messages by conversation turn (same direction, sequential chunks)
+            turns = []
+            current_turn = None
+
+            for msg in messages:
+                # Check if this is part of current turn (same direction, chunk_index continues)
+                if current_turn and msg.direction == current_turn.direction:
+                    # Check if this is next chunk in sequence
+                    if msg.chunk_index is not None and current_turn.chunk_index is not None:
+                        if msg.chunk_index == current_turn.chunk_index + 1:
+                            # Stitch content together with newline
+                            current_turn.content += "\n" + msg.content
+                            current_turn.chunk_index = msg.chunk_index
+                            continue
+
+                # Start new turn
+                if current_turn:
+                    turns.append(current_turn)
+
+                # Create a copy of the message for the new turn
+                current_turn = Message(
+                    direction=msg.direction,
+                    sender=msg.sender,
+                    recipient=msg.recipient,
+                    content=msg.content,
+                    chunk_index=msg.chunk_index,
+                    thinking=msg.thinking,
+                    timestamp=msg.timestamp,
+                )
+
+            # Don't forget the last turn
+            if current_turn:
+                turns.append(current_turn)
+
+            # Return last N turns
+            return turns[-limit:] if len(turns) > limit else turns
 
     def log_message(
         self,
@@ -81,7 +122,6 @@ class Database:
             chunk_index: Optional chunk index for streaming responses
             thinking: Optional LLM reasoning text for thinking models
         """
-        from penny.memory.models import Message
 
         try:
             with self.get_session() as session:
@@ -106,7 +146,6 @@ class Database:
         Args:
             content: The memory content to store
         """
-        from penny.memory.models import Memory
 
         try:
             with self.get_session() as session:
@@ -124,11 +163,28 @@ class Database:
         Returns:
             List of Memory objects, ordered by creation time
         """
-        from penny.memory.models import Memory
 
         with self.get_session() as session:
             memories = session.query(Memory).order_by(Memory.created_at).all()
             return list(memories)
+
+    def compact_memories(self, summary: str) -> None:
+        """
+        Replace all memories with a single summary memory.
+
+        Args:
+            summary: The compacted memory summary
+        """
+
+        with self.get_session() as session:
+            # Delete all existing memories
+            session.query(Memory).delete()
+
+            # Create new summary memory
+            memory = Memory(content=summary)
+            session.add(memory)
+            session.commit()
+            logger.info("Compacted memories into summary (%d chars)", len(summary))
 
     def create_task(self, content: str, requester: str):
         """
@@ -141,7 +197,6 @@ class Database:
         Returns:
             The created Task object
         """
-        from penny.memory.models import Task
 
         with self.get_session() as session:
             task = Task(content=content, requester=requester)
@@ -158,7 +213,6 @@ class Database:
         Returns:
             List of Task objects with status="pending"
         """
-        from penny.memory.models import Task, TaskStatus
 
         with self.get_session() as session:
             tasks = (
@@ -178,9 +232,7 @@ class Database:
             status: New status (pending/in_progress/completed)
             started_at: Optional datetime when task started
         """
-        from datetime import datetime
 
-        from penny.memory.models import Task
 
         with self.get_session() as session:
             task = session.get(Task, task_id)
@@ -199,9 +251,7 @@ class Database:
             task_id: ID of the task to complete
             result: Final result text
         """
-        from datetime import datetime
 
-        from penny.memory.models import Task, TaskStatus
 
         with self.get_session() as session:
             task = session.get(Task, task_id)
