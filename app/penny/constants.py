@@ -24,7 +24,7 @@ SYSTEM_PROMPT = (
 )
 
 # Search tool constants
-PERPLEXITY_PRESET = "pro-search"
+PERPLEXITY_PRESET = "sonar"
 NO_RESULTS_TEXT = "No results found"
 IMAGE_MAX_RESULTS = 3
 IMAGE_DOWNLOAD_TIMEOUT = 15.0
