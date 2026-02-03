@@ -1,6 +1,6 @@
 # Penny
 
-A simple, local-first AI agent that communicates via Signal and runs entirely on your machine.
+A local-first AI agent that communicates via Signal and runs entirely on your machine.
 
 **Author:** Jared Lockhart
 
@@ -8,9 +8,27 @@ A simple, local-first AI agent that communicates via Signal and runs entirely on
 
 Penny is a personal AI agent built with simplicity and privacy in mind. It runs locally, uses open-source models via Ollama, and communicates through Signal for a secure, familiar interface.
 
+**How it works:**
+
+You send a message on Signal. Penny searches the web via Perplexity and finds a relevant image via DuckDuckGo — both in parallel — then responds in a casual, lowercase style with the image attached. If you reply to one of Penny's messages, it rebuilds the conversation thread for context.
+
+**Key Features:**
+- **Perplexity Search**: Every response is grounded in a web search — Penny never answers from model knowledge alone
+- **Image Attachments**: Every response includes a relevant image from DuckDuckGo, sent as a Signal attachment (degrades gracefully if unavailable)
+- **Source URLs**: URLs extracted from Perplexity search results and annotations, presented as a Sources list so the model picks the most relevant one
+- **Thread-Based Context**: Quote-reply to continue a conversation; Penny walks the message chain to rebuild history
+- **Spontaneous Continuation**: Penny randomly continues idle conversations by searching for something new about the topic (configurable idle timeout and interval)
+- **Thread Summarization**: Background task summarizes idle threads via Ollama and caches the summary for future context
+- **Full Logging**: Every Ollama prompt, Perplexity search, and user/agent message is logged to SQLite
+- **Agent Loop**: Multi-step reasoning with tool calling (up to 5 steps), with duplicate tool call protection
+- **Search Result Cleaning**: Regex-based stripping of markdown and citations from Perplexity results before they reach the LLM
+- **Retry on Failure**: Ollama client retries up to 3 times on transient errors (e.g. malformed tool call JSON)
+- **Signal Text Formatting**: Supports bold, italic, strikethrough, and monospace via `text_mode: "styled"`
+- **Quote-Reply Context**: Handles Signal's markdown stripping and quote truncation for reliable thread reconstruction
+
 ## Architecture
 
-### Components
+### System Components
 
 ```
 ┌─────────────────────────────────────┐
@@ -24,7 +42,9 @@ Penny is a personal AI agent built with simplicity and privacy in mind. It runs 
 │                                      │
 │  ollama                              │
 │  └─ API: localhost:11434            │
-│     └─ POST /api/generate            │
+│     └─ POST /api/chat                │
+│                                      │
+│  perplexity API (external)          │
 │                                      │
 │  ./data/agent.db (SQLite)           │
 │                                      │
@@ -36,12 +56,31 @@ Penny is a personal AI agent built with simplicity and privacy in mind. It runs 
         │  Penny Agent  │
         │  (Python)     │
         │               │
-        │  - WebSocket  │
-        │  - HTTP       │
-        │  - Skills     │
-        │  - Memory     │
+        │  - Message    │
+        │    Listener   │
+        │  - Agent      │
+        │    Loop       │
+        │  - Search     │
+        │    (Perplexity│
+        │    + DDG img) │
+        │  - Spontaneous│
+        │    Continuation│
+        │  - Thread     │
+        │    Summarizer │
+        │  - SQLite     │
+        │    Logging    │
         └───────────────┘
 ```
+
+### Message Flow
+
+1. User sends Signal message (or quote-replies to a previous response)
+2. If quote-reply: look up the quoted message, walk the parent chain to build thread history
+3. Log incoming message (linked to parent if replying)
+4. Run agent loop: Ollama calls search tool, which runs Perplexity (text) and DuckDuckGo (images) in parallel. Search results include extracted source URLs for the model to reference.
+5. Log outgoing message (linked to incoming)
+6. Send response back via Signal with image attachment (if available)
+7. Background: when idle, summarize threads and optionally continue dangling conversations
 
 ### Design Decisions
 
@@ -50,80 +89,24 @@ Penny is a personal AI agent built with simplicity and privacy in mind. It runs 
 - **Networking**: `--network host` for simplicity (all local, no security concerns)
 - **Persistence**: SQLite on host filesystem via volume mount (survives container restarts)
 - **Communication**: WebSocket for receiving (real-time), REST for sending (simple)
-
-## Python Agent Loop
-
-### Core Loop Design
-
-```python
-# High-level pseudocode (MVP - simple relay)
-
-1. Initialize
-   - Load configuration from .env file
-   - Connect to SQLite (./data/agent.db)
-   - Initialize database schema if needed
-
-2. Open WebSocket to signal-cli
-   - Connect to ws://localhost:8080/v1/receive/<number>
-   - Handle connection errors/reconnection
-
-3. Message Loop
-   For each incoming message:
-
-   a. Parse message
-      - Extract sender, content, timestamp
-      - Identify conversation thread
-
-   b. Store incoming message
-      - Save to SQLite (messages table, type='incoming')
-
-   c. Build context
-      - Load recent conversation history (last N messages)
-      - Format for Ollama prompt
-
-   d. Generate response
-      - Send context + message to Ollama
-      - Wait for complete response
-
-   e. Send reply
-      - POST to signal-cli /v2/send
-      - Include original sender as recipient
-
-   f. Store outgoing response
-      - Save assistant reply to SQLite (type='outgoing')
-
-4. Error Handling
-   - Reconnect WebSocket on disconnect
-   - Retry failed sends (with backoff)
-   - Log errors to SQLite (type='error') and stdout
-```
-
-### Key Modules (MVP)
-
-- **`agent.py`**: Main loop, WebSocket handling, message routing
-- **`memory.py`**: SQLite operations, conversation history, context building
-- **`llm.py`**: Ollama API client, prompt building, response handling
-- **`config.py`**: Configuration management, loads from .env file
+- **Thread History**: Parent-child message linking via quote-reply, not sliding window
 
 ## Data Model
 
-### SQLite Schema (MVP)
+Penny stores three types of log data in SQLite:
 
-```sql
--- Messages: complete log of all Signal messages and LLM responses
-CREATE TABLE messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL,   -- Phone number or group ID
-    sender TEXT NOT NULL,             -- Phone number (or 'assistant')
-    content TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
-    message_type TEXT DEFAULT 'text', -- 'incoming', 'outgoing', 'error'
-    created_at INTEGER DEFAULT (strftime('%s', 'now'))
-);
+**PromptLog**: Every call to Ollama
+- Model name, full message list (JSON), tool definitions (JSON), response (JSON)
+- Thinking/reasoning trace (if model supports it)
+- Call duration in milliseconds
 
-CREATE INDEX idx_messages_conversation ON messages(conversation_id, timestamp);
-CREATE INDEX idx_messages_timestamp ON messages(timestamp DESC);
-```
+**SearchLog**: Every Perplexity search (image searches are not logged separately)
+- Query text, response text, call duration
+
+**MessageLog**: Every user message and agent response
+- Direction (incoming/outgoing), sender, content
+- Parent ID (foreign key to self) for threading quote-replies
+- Parent summary (cached thread summary for context reconstruction)
 
 ## Setup & Running
 
@@ -131,7 +114,8 @@ CREATE INDEX idx_messages_timestamp ON messages(timestamp DESC);
 
 1. **signal-cli-rest-api** running on host (port 8080)
 2. **Ollama** running on host (port 11434)
-3. Docker & Docker Compose installed
+3. **Perplexity API key** (for web search)
+4. Docker & Docker Compose installed
 
 ### Quick Start
 
@@ -141,21 +125,22 @@ cp .env.example .env
 # Edit .env with your settings
 
 # 2. Start the agent
-docker-compose up --build
+make up
 ```
 
-### docker-compose.yml
+### Make Commands
 
-```yaml
-services:
-  penny:
-    build: .
-    network_mode: host
-    volumes:
-      - ./data:/app/data
-      - ./.env:/app/.env
-    restart: unless-stopped
+```bash
+make up          # Build and start all services (foreground)
+make kill        # Tear down containers and remove local images
+make check       # Format check (read-only), lint, and typecheck
+make fmt         # Format with ruff
+make lint        # Lint with ruff
+make fix         # Format + autofix lint issues
+make typecheck   # Type check with ty
 ```
+
+All dev tool commands run in temporary Docker containers via `docker-compose run --rm`, with source volume-mounted so changes write back to the host filesystem.
 
 ## Configuration
 
@@ -166,95 +151,70 @@ Configuration is managed via a `.env` file in the project root:
 SIGNAL_NUMBER="+1234567890"
 SIGNAL_API_URL="http://localhost:8080"
 OLLAMA_API_URL="http://localhost:11434"
-OLLAMA_MODEL="llama3"
+OLLAMA_MODEL="llama3.2"
 LOG_LEVEL="INFO"
+DB_PATH="./data/agent.db"
+LOG_FILE="./data/penny.log"
+PERPLEXITY_API_KEY="your-api-key"
+
+# Agent behavior (optional, defaults shown)
+MESSAGE_MAX_STEPS=5
+SUMMARIZE_IDLE_SECONDS=30
+CONTINUE_IDLE_SECONDS=1800
+CONTINUE_MIN_SECONDS=1800
+CONTINUE_MAX_SECONDS=10800
 ```
 
-**Configuration Options:**
-- `SIGNAL_NUMBER`: Your registered Signal number (required)
+**Required:**
+- `SIGNAL_NUMBER`: Your registered Signal number
+
+**Optional (with defaults):**
 - `SIGNAL_API_URL`: signal-cli REST API endpoint (default: http://localhost:8080)
 - `OLLAMA_API_URL`: Ollama API endpoint (default: http://localhost:11434)
-- `OLLAMA_MODEL`: Model name to use (default: llama3)
-- `LOG_LEVEL`: Logging verbosity (default: INFO)
+- `OLLAMA_MODEL`: Model name to use (default: llama3.2)
+- `LOG_LEVEL`: Logging verbosity — DEBUG, INFO, WARNING, ERROR (default: INFO)
+- `DB_PATH`: SQLite database location (default: /app/data/penny.db)
+- `LOG_FILE`: Log file path (default: none)
+- `PERPLEXITY_API_KEY`: API key for web search (without this, the agent has no tools)
+- `MESSAGE_MAX_STEPS`: Max agent loop steps per message (default: 5)
+- `SUMMARIZE_IDLE_SECONDS`: Idle time before summarizing threads (default: 300)
+- `CONTINUE_IDLE_SECONDS`: Idle time before spontaneous continuation is eligible (default: 1800)
+- `CONTINUE_MIN_SECONDS`: Minimum random delay between continuation attempts (default: 1800)
+- `CONTINUE_MAX_SECONDS`: Maximum random delay between continuation attempts (default: 10800)
 
-## Development
+## Technical Notes
 
-### Local Development (without Docker)
+### Signal Formatting
 
-```bash
-# Install uv if you haven't already
-curl -LsSf https://astral.sh/uv/install.sh | sh
+signal-cli-rest-api supports markdown-style text formatting, but requires `text_mode: "styled"` in the request body:
+- `**bold**` → **bold**
+- `*italic*` → *italic*
+- `~strikethrough~` → ~~strikethrough~~ (note: single tilde, not double)
+- `` `monospace` `` → `monospace`
 
-# Navigate to app directory
-cd app
+### Quote-Reply Thread Reconstruction
 
-# Install dependencies
-uv pip install -e .
+When a user quote-replies to a Penny message, Signal:
+1. Converts markdown to native formatting (so `**bold**` becomes plain bold)
+2. Strips all formatting when including the quoted text in the reply envelope
+3. Truncates the quoted text (often to ~100 characters)
 
-# Install dev dependencies
-uv pip install ruff ty
+To reliably look up the original message:
+- Outgoing messages are stored with markdown stripped
+- Quoted text is stripped before lookup
+- Lookup uses prefix matching (`startswith`) instead of exact match
 
-# Create .env file (in project root)
-cd ..
-cp .env.example .env
-# Edit .env with your settings
+### Performance
 
-# Run the agent
-cd app
-python -m penny.agent
-
-# Format code
-ruff format .
-
-# Lint code
-ruff check .
-
-# Type check
-ty
-```
-
-### Project Structure
-
-```
-penny/                       # Project root
-├── docker-compose.yml       # Container orchestration
-├── .env.example             # Configuration template
-├── README.md                # This file
-├── data/                    # SQLite database (git-ignored)
-│   └── agent.db
-└── app/                     # Application code
-    ├── Dockerfile           # Container definition
-    ├── pyproject.toml       # Dependencies & tool config (uv, ruff, ty)
-    └── penny/               # Python package
-        ├── __init__.py
-        ├── agent.py         # Main loop & WebSocket handling
-        ├── config.py        # Configuration management
-        ├── memory.py        # SQLite operations
-        └── llm.py           # Ollama client
-```
-
-## Development Roadmap
-
-### MVP (v0.1) - Simple Signal ↔ Ollama Relay
-- [ ] Core agent loop with WebSocket message handling
-- [ ] SQLite message logging (incoming/outgoing)
-- [ ] Ollama integration for LLM responses
-- [ ] Conversation context (last N messages)
-- [ ] Docker containerization
-- [ ] Error handling and reconnection logic
-
-### Future Enhancements
-- [ ] Skills system architecture
-- [ ] Perplexity search skill
-- [ ] Internal memory/learning system
-- [ ] Multi-user conversation management
-- [ ] Response streaming
-- [ ] Attachment support
+With `gpt-oss:20b` and the current simplified prompt, typical response times are:
+- Tool call decisions: 2-4 seconds
+- Final answer generation: 5-24 seconds
+- Total end-to-end: 10-34 seconds per message
 
 ## Inspiration
 
-Based on learnings from openclaw - built to be simpler, cleaner, and more maintainable.
+Based on learnings from openclaw — built to be simpler, cleaner, and more maintainable.
 
 ## License
 
-[Your preferred license]
+MIT

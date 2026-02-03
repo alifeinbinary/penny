@@ -10,19 +10,23 @@ class IncomingMessage(BaseModel):
 
     sender: str
     content: str
+    quoted_text: str | None = None
 
 
 class MessageChannel(ABC):
     """Abstract base class for communication channels."""
 
     @abstractmethod
-    async def send_message(self, recipient: str, message: str) -> bool:
+    async def send_message(
+        self, recipient: str, message: str, attachments: list[str] | None = None
+    ) -> bool:
         """
         Send a message to a recipient.
 
         Args:
             recipient: Identifier for the recipient (platform-specific)
             message: Message content
+            attachments: Optional list of base64-encoded attachments
 
         Returns:
             True if successful, False otherwise

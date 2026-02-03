@@ -12,12 +12,38 @@ from dotenv import load_dotenv
 class Config:
     """Application configuration loaded from .env file."""
 
+    # Signal/messaging configuration
     signal_number: str
     signal_api_url: str
+
+    # Ollama configuration
     ollama_api_url: str
     ollama_model: str
+
+    # API keys
+    perplexity_api_key: str | None
+
+    # Logging configuration
     log_level: str
+
+    # Database configuration
     db_path: str
+
+    # Optional fields with defaults
+    log_file: str | None = None
+
+    # Agent runtime configuration
+    message_max_steps: int = 5
+    summarize_idle_seconds: float = 300.0
+
+    # Ollama retry configuration
+    ollama_max_retries: int = 3
+    ollama_retry_delay: float = 0.5
+
+    # Spontaneous continuation
+    continue_idle_seconds: float = 1800.0
+    continue_min_seconds: float = 1800.0
+    continue_max_seconds: float = 10800.0
 
     @classmethod
     def load(cls) -> "Config":
@@ -42,23 +68,69 @@ class Config:
         signal_api_url = os.getenv("SIGNAL_API_URL", "http://localhost:8080")
         ollama_api_url = os.getenv("OLLAMA_API_URL", "http://host.docker.internal:11434")
         ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
+        perplexity_api_key = os.getenv("PERPLEXITY_API_KEY")  # Optional
         log_level = os.getenv("LOG_LEVEL", "INFO")
         db_path = os.getenv("DB_PATH", "/app/data/penny.db")
+        log_file = os.getenv("LOG_FILE")  # Optional, defaults to None
 
         return cls(
             signal_number=signal_number,
             signal_api_url=signal_api_url,
             ollama_api_url=ollama_api_url,
             ollama_model=ollama_model,
+            perplexity_api_key=perplexity_api_key,
             log_level=log_level,
             db_path=db_path,
+            log_file=log_file,
         )
 
 
-def setup_logging(log_level: str) -> None:
-    """Configure logging for the application."""
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+def setup_logging(log_level: str, log_file: str | None = None) -> None:
+    """
+    Configure logging for the application.
+
+    Args:
+        log_level: Log level (DEBUG, INFO, WARNING, ERROR)
+        log_file: Optional path to log file. If provided, logs to both file and console.
+    """
+    # Create formatter
+    formatter = logging.Formatter(
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # Get root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, log_level.upper()))
+
+    # Clear any existing handlers
+    root_logger.handlers.clear()
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # File handler (if log_file specified)
+    if log_file:
+        # Ensure log directory exists
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        file_handler = logging.FileHandler(log_file, mode="a")
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+        root_logger.info("Logging to file: %s", log_file)
+
+    # Silence noisy third-party loggers
+    for name in (
+        "httpcore",
+        "httpx",
+        "websockets",
+        "perplexity",
+        "duckduckgo_search",
+        "primp",
+        "rquest",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)

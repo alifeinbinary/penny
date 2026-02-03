@@ -1,6 +1,7 @@
 """Signal implementation of MessageChannel."""
 
 import logging
+import re
 
 import httpx
 from pydantic import ValidationError
@@ -32,17 +33,48 @@ class SignalChannel(MessageChannel):
         self.http_client = httpx.AsyncClient(timeout=30.0)
         logger.info("Initialized Signal channel: url=%s, number=%s", api_url, phone_number)
 
-    async def send_message(self, recipient: str, message: str) -> bool:
+    @staticmethod
+    def _format_for_signal(text: str) -> str:
+        """Format text for signal-cli-rest-api.
+
+        signal-cli-rest-api supports markdown-style formatting:
+        - **bold** for bold
+        - *italic* for italic
+        - ~strikethrough~ for strikethrough (single tilde, not double)
+        - `monospace` for monospace
+        """
+        # Convert ~~strikethrough~~ to ~strikethrough~ (markdown uses double, signal uses single)
+        text = re.sub(r"~~(.+?)~~", r"~\1~", text)
+        # Remove markdown headings (keep the text)
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+        # Convert markdown links [text](url) to just text (url)
+        text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", text)
+        # Collapse multiple blank lines
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    async def send_message(
+        self, recipient: str, message: str, attachments: list[str] | None = None
+    ) -> bool:
         """Send a message via Signal."""
+        # Validate message is not empty
+        if not message or not message.strip():
+            logger.error("Attempted to send empty message to %s", recipient)
+            raise ValueError("Cannot send empty or whitespace-only message")
+
+        # Format for signal-cli-rest-api (supports markdown-style formatting)
+        message = self._format_for_signal(message)
+
         try:
             url = f"{self.api_url}/v2/send"
             request = SendMessageRequest(
                 message=message,
                 number=self.phone_number,
                 recipients=[recipient],
+                base64_attachments=attachments if attachments else None,
             )
 
-            logger.debug("Sending to %s: %s", url, request.model_dump())
+            logger.debug("Sending to %s: %s", url, request)
 
             response = await self.http_client.post(
                 url,
@@ -61,11 +93,12 @@ class SignalChannel(MessageChannel):
 
         except httpx.HTTPError as e:
             logger.error("Failed to send Signal message: %s", e)
-            if hasattr(e, "response") and e.response is not None:
+            resp = getattr(e, "response", None)
+            if resp is not None:
                 logger.error(
                     "Response status: %d, body: %s",
-                    e.response.status_code,
-                    e.response.text,
+                    resp.status_code,
+                    resp.text,
                 )
             return False
 
@@ -75,7 +108,9 @@ class SignalChannel(MessageChannel):
             url = f"{self.api_url}/v1/typing-indicator/{self.phone_number}"
             request = TypingIndicatorRequest(recipient=recipient)
 
-            logger.debug("Sending typing indicator to %s: %s", recipient, "started" if typing else "stopped")
+            logger.debug(
+                "Sending typing indicator to %s: %s", recipient, "started" if typing else "stopped"
+            )
 
             method = HttpMethod.PUT if typing else HttpMethod.DELETE
             response = await self.http_client.request(method.value, url, json=request.model_dump())
@@ -115,7 +150,13 @@ class SignalChannel(MessageChannel):
             logger.debug("Ignoring empty message from %s", sender)
             return None
 
-        return IncomingMessage(sender=sender, content=content)
+        # Extract quoted text if this is a reply
+        quoted_text = None
+        if envelope.envelope.dataMessage.quote and envelope.envelope.dataMessage.quote.text:
+            quoted_text = envelope.envelope.dataMessage.quote.text
+            logger.info("Message includes quote: '%s'", quoted_text[:100])
+
+        return IncomingMessage(sender=sender, content=content, quoted_text=quoted_text)
 
     def _parse_envelope(self, envelope_data: dict) -> SignalEnvelope | None:
         """Parse a Signal WebSocket envelope."""

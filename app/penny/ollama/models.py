@@ -27,8 +27,10 @@ class GenerateResponse(BaseModel):
 
     model: str
     created_at: str = Field(alias="created_at")
-    response: str
+    response: str = ""
+    thinking: str = ""  # For thinking models
     done: bool
+    tool_calls: list[dict[str, Any]] | None = None  # Ollama native tool calling
     context: list[int] | None = None
     total_duration: int | None = Field(default=None, alias="total_duration")
     load_duration: int | None = Field(default=None, alias="load_duration")
@@ -66,3 +68,59 @@ class ResponseLine(BaseModel):
 
     line: str
     thinking: str | None = None
+
+
+class OllamaToolCallFunction(BaseModel):
+    """Function details within an Ollama tool call."""
+
+    name: str = ""
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class OllamaToolCall(BaseModel):
+    """A tool call from the Ollama chat response."""
+
+    function: OllamaToolCallFunction = Field(default_factory=OllamaToolCallFunction)
+
+
+class ChatResponseMessage(BaseModel):
+    """Message object from chat response."""
+
+    role: str
+    content: str = ""
+    tool_calls: list[OllamaToolCall] | None = None
+    thinking: str | None = None
+
+    class Config:
+        populate_by_name = True
+
+    def to_input_message(self) -> dict[str, Any]:
+        """Convert to input message format for Ollama (excludes thinking)."""
+        msg: dict[str, Any] = {"role": self.role, "content": self.content}
+        if self.tool_calls:
+            msg["tool_calls"] = [tc.model_dump() for tc in self.tool_calls]
+        return msg
+
+
+class ChatResponse(BaseModel):
+    """Response from Ollama chat API."""
+
+    message: ChatResponseMessage
+    thinking: str | None = None
+    done: bool = True
+    model: str | None = None
+    created_at: str | None = None
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"  # Allow additional fields from Ollama
+
+    @property
+    def content(self) -> str:
+        """Get message content."""
+        return self.message.content
+
+    @property
+    def has_tool_calls(self) -> bool:
+        """Check if response has tool calls."""
+        return bool(self.message.tool_calls)
