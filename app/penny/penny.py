@@ -40,7 +40,7 @@ class Penny:
 
         self.message_agent = MessageAgent(
             system_prompt=SYSTEM_PROMPT,
-            model=config.ollama_model,
+            model=config.ollama_foreground_model,
             ollama_api_url=config.ollama_api_url,
             tools=search_tools(),
             db=self.db,
@@ -51,7 +51,7 @@ class Penny:
 
         self.followup_agent = FollowupAgent(
             system_prompt=SYSTEM_PROMPT,
-            model=config.ollama_model,
+            model=config.ollama_background_model,
             ollama_api_url=config.ollama_api_url,
             tools=search_tools(),
             db=self.db,
@@ -62,7 +62,7 @@ class Penny:
 
         self.summarize_agent = SummarizeAgent(
             system_prompt=SUMMARIZE_PROMPT,
-            model=config.ollama_model,
+            model=config.ollama_background_model,
             ollama_api_url=config.ollama_api_url,
             tools=[],
             db=self.db,
@@ -73,7 +73,7 @@ class Penny:
 
         self.profile_agent = ProfileAgent(
             system_prompt=PROFILE_PROMPT,
-            model=config.ollama_model,
+            model=config.ollama_background_model,
             ollama_api_url=config.ollama_api_url,
             tools=[],
             db=self.db,
@@ -84,7 +84,7 @@ class Penny:
 
         self.discovery_agent = DiscoveryAgent(
             system_prompt=SYSTEM_PROMPT,
-            model=config.ollama_model,
+            model=config.ollama_background_model,
             ollama_api_url=config.ollama_api_url,
             tools=search_tools(),
             db=self.db,
@@ -138,7 +138,9 @@ class Penny:
         """Run the agent."""
         logger.info("Starting Penny AI agent...")
         logger.info("Channel: %s (sender_id=%s)", self.config.channel_type, self.channel.sender_id)
-        logger.info("Ollama model: %s", self.config.ollama_model)
+        logger.info("Ollama model: %s (messages)", self.config.ollama_foreground_model)
+        if self.config.ollama_background_model != self.config.ollama_foreground_model:
+            logger.info("Ollama model: %s (background)", self.config.ollama_background_model)
 
         try:
             await asyncio.gather(
@@ -164,7 +166,8 @@ async def main() -> None:
 
     logger.info("Starting Penny with config:")
     logger.info("  channel_type: %s", config.channel_type)
-    logger.info("  ollama_model: %s", config.ollama_model)
+    logger.info("  ollama_model: %s", config.ollama_foreground_model)
+    logger.info("  ollama_background_model: %s", config.ollama_background_model)
     logger.info("  ollama_api_url: %s", config.ollama_api_url)
     logger.info("  summarize_idle: %.0fs", config.summarize_idle_seconds)
     logger.info("  profile_idle: %.0fs", config.profile_idle_seconds)

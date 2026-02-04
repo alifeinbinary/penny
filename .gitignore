@@ -1,5 +1,7 @@
 # Environment
 .env
+.env.prod
+.env.test
 
 # Data directory (SQLite database)
 data/

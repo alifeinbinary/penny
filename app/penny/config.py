@@ -25,7 +25,8 @@ class Config:
 
     # Ollama configuration
     ollama_api_url: str
-    ollama_model: str
+    ollama_foreground_model: str  # Fast model for user-facing messages
+    ollama_background_model: str  # Smart model for background tasks
 
     # API keys
     perplexity_api_key: str | None
@@ -113,7 +114,9 @@ class Config:
         # Optional fields with defaults
         signal_api_url = os.getenv("SIGNAL_API_URL", "http://localhost:8080")
         ollama_api_url = os.getenv("OLLAMA_API_URL", "http://host.docker.internal:11434")
-        ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
+        ollama_foreground_model = os.getenv("OLLAMA_FOREGROUND_MODEL", "llama3.2")
+        # Background model defaults to foreground model if not specified
+        ollama_background_model = os.getenv("OLLAMA_BACKGROUND_MODEL", ollama_foreground_model)
         perplexity_api_key = os.getenv("PERPLEXITY_API_KEY")  # Optional
         log_level = os.getenv("LOG_LEVEL", "INFO")
         db_path = os.getenv("DB_PATH", "/app/data/penny.db")
@@ -142,7 +145,8 @@ class Config:
             discord_bot_token=discord_bot_token,
             discord_channel_id=discord_channel_id,
             ollama_api_url=ollama_api_url,
-            ollama_model=ollama_model,
+            ollama_foreground_model=ollama_foreground_model,
+            ollama_background_model=ollama_background_model,
             perplexity_api_key=perplexity_api_key,
             log_level=log_level,
             db_path=db_path,

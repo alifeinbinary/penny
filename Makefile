@@ -1,8 +1,16 @@
 DC = docker-compose run --rm penny
 
-.PHONY: up kill fmt lint fix typecheck check
+.PHONY: up test prod kill fmt lint fix typecheck check
 
 up:
+	docker-compose up --build
+
+test:
+	cp .env.test .env
+	docker-compose up --build
+
+prod:
+	cp .env.prod .env
 	docker-compose up --build
 
 kill:
