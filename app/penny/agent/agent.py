@@ -1,13 +1,20 @@
 """High-level Agent abstraction with agentic loop."""
 
+from __future__ import annotations
+
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from penny.agent.models import ChatMessage, ControllerResponse, MessageRole
+from penny.constants import CONTINUE_PROMPT, MessageDirection
 from penny.database import Database
 from penny.ollama import OllamaClient
 from penny.tools import Tool, ToolCall, ToolExecutor, ToolRegistry
 from penny.tools.models import SearchResult
+
+if TYPE_CHECKING:
+    from penny.database.models import MessageLog
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +27,7 @@ class Agent:
     and can have optional tools for agentic behavior.
     """
 
-    _instances: list["Agent"] = []
+    _instances: list[Agent] = []
 
     def __init__(
         self,
@@ -199,3 +206,106 @@ class Agent:
         """Close all agent instances."""
         for agent in cls._instances[:]:
             await agent.close()
+
+
+class MessageAgent(Agent):
+    """Agent for handling incoming user messages."""
+
+    async def handle(
+        self,
+        content: str,
+        quoted_text: str | None = None,
+    ) -> tuple[int | None, ControllerResponse]:
+        """
+        Handle an incoming message, preparing context and running the agent.
+
+        Args:
+            content: The message content from the user
+            quoted_text: Optional quoted text if this is a reply
+
+        Returns:
+            Tuple of (parent_id, response) where parent_id links to the quoted message
+        """
+        parent_id = None
+        history = None
+        if quoted_text:
+            parent_id, history = self.db.get_thread_context(quoted_text)
+        response = await self.run(prompt=content, history=history)
+        return parent_id, response
+
+
+class SummarizeAgent(Agent):
+    """Agent for summarizing conversation threads."""
+
+    async def summarize(self, message_id: int) -> str | None:
+        """
+        Summarize a thread, returning the summary text.
+
+        Args:
+            message_id: ID of the message whose thread to summarize
+
+        Returns:
+            Summary text, empty string if thread too short, None on error
+        """
+        thread = self.db._walk_thread(message_id)
+        if len(thread) < 2:
+            return ""  # Mark as processed but no real summary needed
+        thread_text = self._format_thread(thread)
+        response = await self.run(prompt=thread_text)
+        return response.answer.strip() if response.answer else None
+
+    def _format_thread(self, thread: list[MessageLog]) -> str:
+        """Format thread as 'role: content' lines for summarization."""
+        return "\n".join(
+            "{}: {}".format(
+                MessageRole.USER.value
+                if m.direction == MessageDirection.INCOMING
+                else MessageRole.ASSISTANT.value,
+                m.content,
+            )
+            for m in thread
+        )
+
+
+class ContinueAgent(Agent):
+    """Agent for spontaneously continuing conversations."""
+
+    async def continue_conversation(
+        self,
+        leaf_id: int,
+    ) -> tuple[str | None, ControllerResponse | None]:
+        """
+        Continue a conversation from a leaf message.
+
+        Args:
+            leaf_id: ID of the leaf message to continue from
+
+        Returns:
+            Tuple of (recipient, response) or (None, None) if cannot continue
+        """
+        thread = self.db._walk_thread(leaf_id)
+        recipient = self._find_recipient(thread)
+        if not recipient:
+            return None, None
+        history = self._format_history(thread)
+        response = await self.run(prompt=CONTINUE_PROMPT, history=history)
+        return recipient, response
+
+    def _find_recipient(self, thread: list[MessageLog]) -> str | None:
+        """Find the user's sender ID from the thread."""
+        for msg in thread:
+            if msg.direction == MessageDirection.INCOMING:
+                return msg.sender
+        return None
+
+    def _format_history(self, thread: list[MessageLog]) -> list[tuple[str, str]]:
+        """Format thread as (role, content) tuples for history."""
+        return [
+            (
+                MessageRole.USER.value
+                if m.direction == MessageDirection.INCOMING
+                else MessageRole.ASSISTANT.value,
+                m.content,
+            )
+            for m in thread
+        ]

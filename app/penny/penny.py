@@ -8,11 +8,10 @@ import sys
 import time
 from typing import Any
 
-from penny.agent import Agent
-from penny.agent.models import MessageRole
+from penny.agent import Agent, ContinueAgent, MessageAgent, SummarizeAgent
 from penny.channels import MessageChannel, create_channel
 from penny.config import Config, setup_logging
-from penny.constants import CONTINUE_PROMPT, SUMMARIZE_PROMPT, SYSTEM_PROMPT, MessageDirection
+from penny.constants import SUMMARIZE_PROMPT, SYSTEM_PROMPT, MessageDirection
 from penny.database import Database
 from penny.tools import SearchTool
 
@@ -34,7 +33,7 @@ class Penny:
                 return [SearchTool(perplexity_api_key=config.perplexity_api_key, db=self.db)]
             return []
 
-        self.message_agent = Agent(
+        self.message_agent = MessageAgent(
             system_prompt=SYSTEM_PROMPT,
             model=config.ollama_model,
             ollama_api_url=config.ollama_api_url,
@@ -45,7 +44,7 @@ class Penny:
             retry_delay=config.ollama_retry_delay,
         )
 
-        self.continue_agent = Agent(
+        self.continue_agent = ContinueAgent(
             system_prompt=SYSTEM_PROMPT,
             model=config.ollama_model,
             ollama_api_url=config.ollama_api_url,
@@ -56,7 +55,7 @@ class Penny:
             retry_delay=config.ollama_retry_delay,
         )
 
-        self.summarize_agent = Agent(
+        self.summarize_agent = SummarizeAgent(
             system_prompt=SUMMARIZE_PROMPT,
             model=config.ollama_model,
             ollama_api_url=config.ollama_api_url,
@@ -100,22 +99,17 @@ class Penny:
 
             logger.info("Received message from %s: %s", message.sender, message.content)
 
-            # Find parent message and build thread context if this is a quoted reply
-            parent_id = None
-            history = None
-            if message.quoted_text:
-                parent_id, history = self.db.get_thread_context(message.quoted_text)
-
-            # Log incoming message linked to parent
-            incoming_id = self.db.log_message(
-                MessageDirection.INCOMING, message.sender, message.content, parent_id=parent_id
-            )
-
             typing_task = asyncio.create_task(self._typing_loop(message.sender))
             try:
-                response = await self.message_agent.run(
-                    prompt=message.content,
-                    history=history,
+                # Agent handles context preparation internally
+                parent_id, response = await self.message_agent.handle(
+                    content=message.content,
+                    quoted_text=message.quoted_text,
+                )
+
+                # Log incoming message linked to parent
+                incoming_id = self.db.log_message(
+                    MessageDirection.INCOMING, message.sender, message.content, parent_id=parent_id
                 )
 
                 answer = (
@@ -164,30 +158,13 @@ class Penny:
                     break
 
                 assert msg.id is not None
-                thread = self.db._walk_thread(msg.id)
-                if len(thread) < 2:
-                    # Single message, just mark it with empty summary to skip next time
-                    self.db.set_parent_summary(msg.id, "")
-                    continue
-
-                # Format thread for summarization
-                thread_text = "\n".join(
-                    "{}: {}".format(
-                        MessageRole.USER.value
-                        if m.direction == MessageDirection.INCOMING
-                        else MessageRole.ASSISTANT.value,
-                        m.content,
-                    )
-                    for m in thread
-                )
-
                 try:
-                    response = await self.summarize_agent.run(prompt=thread_text)
-                    summary = response.answer.strip()
-                    self.db.set_parent_summary(msg.id, summary)
-                    logger.info(
-                        "Summarized thread for message %d (length: %d)", msg.id, len(summary)
-                    )
+                    summary = await self.summarize_agent.summarize(msg.id)
+                    if summary is not None:
+                        self.db.set_parent_summary(msg.id, summary)
+                        logger.info(
+                            "Summarized thread for message %d (length: %d)", msg.id, len(summary)
+                        )
                 except Exception as e:
                     logger.error("Failed to summarize thread for message %d: %s", msg.id, e)
 
@@ -247,45 +224,24 @@ class Penny:
             leaf = random.choice(leaves)
             assert leaf.id is not None
 
-            # Walk thread to find the recipient (sender of an incoming message)
-            thread = self.db._walk_thread(leaf.id)
-            recipient = None
-            for msg in thread:
-                if msg.direction == MessageDirection.INCOMING:
-                    recipient = msg.sender
-                    break
-
-            if not recipient:
-                logger.debug("Could not find recipient for leaf message %d", leaf.id)
-                continue
-
-            logger.info(
-                "Spontaneously continuing conversation (leaf=%d, recipient=%s)", leaf.id, recipient
-            )
-
-            # Build thread history
-            history = [
-                (
-                    MessageRole.USER
-                    if m.direction == MessageDirection.INCOMING
-                    else MessageRole.ASSISTANT,
-                    m.content,
-                )
-                for m in thread
-            ]
-
             try:
+                recipient, response = await self.continue_agent.continue_conversation(leaf.id)
+                if not recipient or not response:
+                    logger.debug("Could not continue conversation for leaf message %d", leaf.id)
+                    continue
+
+                logger.info(
+                    "Spontaneously continuing conversation (leaf=%d, recipient=%s)",
+                    leaf.id,
+                    recipient,
+                )
+
+                answer = response.answer.strip() if response.answer else None
+                if not answer:
+                    continue
+
                 typing_task = asyncio.create_task(self._typing_loop(recipient))
                 try:
-                    response = await self.continue_agent.run(
-                        prompt=CONTINUE_PROMPT,
-                        history=history,
-                    )
-
-                    answer = response.answer.strip() if response.answer else None
-                    if not answer:
-                        continue
-
                     self.db.log_message(
                         MessageDirection.OUTGOING,
                         self.channel.sender_id,
