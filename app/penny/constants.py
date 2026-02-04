@@ -33,15 +33,14 @@ URL_BLOCKLIST_DOMAINS = (
 
 FOLLOWUP_PROMPT = (
     "Follow up on this conversation by searching for something new about the topic. "
-    "Open casually like 'so i was thinking more about...' then share what you found. "
+    "Open casually, then share what you found. "
     "Keep it short, like texting a friend."
 )
 
 DISCOVERY_PROMPT = (
     "Based on this user's interests, search for something new and interesting they'd enjoy. "
     "Don't reference past conversations - just share a cool discovery out of the blue. "
-    "Open casually like 'yo check this out' or 'thought you might like this'. "
-    "Keep it short, like texting a friend."
+    "Open casually, keep it short, like texting a friend."
 )
 
 SUMMARIZE_PROMPT = (
