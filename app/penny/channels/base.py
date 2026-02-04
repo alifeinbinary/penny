@@ -176,12 +176,13 @@ class MessageChannel(ABC):
         This is the main message handling logic, shared by all channel implementations.
         """
         try:
-            if self._scheduler:
-                self._scheduler.notify_message()
-
             message = self.extract_message(envelope_data)
             if message is None:
                 return
+
+            # Only reset idle timers for real messages, not receipts/sync messages
+            if self._scheduler:
+                self._scheduler.notify_message()
 
             logger.info("Received message from %s: %s", message.sender, message.content)
 
