@@ -28,8 +28,8 @@ URL_BLOCKLIST_DOMAINS = (
     "apps.apple.com",
 )
 
-CONTINUE_PROMPT = (
-    "Continue this conversation by searching for something new about the topic. "
+FOLLOWUP_PROMPT = (
+    "Follow up on this conversation by searching for something new about the topic. "
     "Open casually like 'so i was thinking more about...' then share what you found. "
     "Keep it short, like texting a friend."
 )

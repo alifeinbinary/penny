@@ -1,12 +1,19 @@
 """Discord implementation of MessageChannel using discord.py."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 import discord
 
-from penny.channels.base import IncomingMessage, MessageCallback, MessageChannel
+from penny.channels.base import IncomingMessage, MessageChannel
 from penny.channels.discord.models import DiscordMessage, DiscordUser
+
+if TYPE_CHECKING:
+    from penny.agent import MessageAgent
+    from penny.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -24,18 +31,25 @@ class DiscordChannel(MessageChannel):
     the pull-based MessageChannel interface.
     """
 
-    def __init__(self, token: str, channel_id: str, on_message: MessageCallback):
+    def __init__(
+        self,
+        token: str,
+        channel_id: str,
+        message_agent: MessageAgent,
+        db: Database,
+    ):
         """
         Initialize Discord channel.
 
         Args:
             token: Discord bot token
             channel_id: The channel ID to listen to and send messages in
-            on_message: Callback for incoming messages
+            message_agent: Agent for processing incoming messages
+            db: Database for logging messages
         """
+        super().__init__(message_agent=message_agent, db=db)
         self._token = token
         self.channel_id = channel_id
-        self._on_message = on_message
         self._running = True
 
         # Set up Discord intents - need guilds to see channels
@@ -123,8 +137,8 @@ class DiscordChannel(MessageChannel):
             )
             raw_data = discord_message.model_dump(by_alias=True)
 
-            # Dispatch to message callback
-            await self._on_message(raw_data)
+            # Dispatch to message handler
+            await self.handle_message(raw_data)
 
     async def listen(self) -> None:
         """Start listening for messages via Discord gateway."""

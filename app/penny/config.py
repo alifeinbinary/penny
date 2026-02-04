@@ -47,10 +47,10 @@ class Config:
     ollama_max_retries: int = 3
     ollama_retry_delay: float = 0.5
 
-    # Spontaneous continuation
-    continue_idle_seconds: float = 1800.0
-    continue_min_seconds: float = 1800.0
-    continue_max_seconds: float = 10800.0
+    # Spontaneous followup
+    followup_idle_seconds: float = 1800.0
+    followup_min_seconds: float = 1800.0
+    followup_max_seconds: float = 10800.0
 
     @classmethod
     def load(cls) -> "Config":
@@ -113,10 +113,13 @@ class Config:
         db_path = os.getenv("DB_PATH", "/app/data/penny.db")
         log_file = os.getenv("LOG_FILE")  # Optional, defaults to None
 
-        # Continuation timing
-        continue_idle_seconds = float(os.getenv("CONTINUE_IDLE_SECONDS", "1800"))
-        continue_min_seconds = float(os.getenv("CONTINUE_MIN_SECONDS", "1800"))
-        continue_max_seconds = float(os.getenv("CONTINUE_MAX_SECONDS", "10800"))
+        # Summarizer timing
+        summarize_idle_seconds = float(os.getenv("SUMMARIZE_IDLE_SECONDS", "300"))
+
+        # Followup timing
+        followup_idle_seconds = float(os.getenv("FOLLOWUP_IDLE_SECONDS", "1800"))
+        followup_min_seconds = float(os.getenv("FOLLOWUP_MIN_SECONDS", "1800"))
+        followup_max_seconds = float(os.getenv("FOLLOWUP_MAX_SECONDS", "10800"))
 
         return cls(
             channel_type=channel_type,
@@ -130,9 +133,10 @@ class Config:
             log_level=log_level,
             db_path=db_path,
             log_file=log_file,
-            continue_idle_seconds=continue_idle_seconds,
-            continue_min_seconds=continue_min_seconds,
-            continue_max_seconds=continue_max_seconds,
+            summarize_idle_seconds=summarize_idle_seconds,
+            followup_idle_seconds=followup_idle_seconds,
+            followup_min_seconds=followup_min_seconds,
+            followup_max_seconds=followup_max_seconds,
         )
 
 

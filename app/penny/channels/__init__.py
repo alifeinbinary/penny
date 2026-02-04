@@ -1,22 +1,35 @@
 """Channel abstraction for communication platforms."""
 
-from penny.channels.base import IncomingMessage, MessageCallback, MessageChannel
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from penny.channels.base import IncomingMessage, MessageChannel
 from penny.channels.discord import DiscordChannel
 from penny.channels.signal import SignalChannel
 from penny.config import Config
+
+if TYPE_CHECKING:
+    from penny.agent import MessageAgent
+    from penny.database import Database
 
 # Channel type constants
 CHANNEL_TYPE_SIGNAL = "signal"
 CHANNEL_TYPE_DISCORD = "discord"
 
 
-def create_channel(config: Config, on_message: MessageCallback) -> MessageChannel:
+def create_channel(
+    config: Config,
+    message_agent: MessageAgent,
+    db: Database,
+) -> MessageChannel:
     """
     Create the appropriate channel based on configuration.
 
     Args:
         config: Application configuration
-        on_message: Callback for incoming messages
+        message_agent: Agent for processing incoming messages
+        db: Database for logging messages
 
     Returns:
         Configured MessageChannel instance
@@ -30,7 +43,8 @@ def create_channel(config: Config, on_message: MessageCallback) -> MessageChanne
         return DiscordChannel(
             token=config.discord_bot_token,
             channel_id=config.discord_channel_id,
-            on_message=on_message,
+            message_agent=message_agent,
+            db=db,
         )
     elif config.channel_type == CHANNEL_TYPE_SIGNAL:
         if not config.signal_number:
@@ -38,7 +52,8 @@ def create_channel(config: Config, on_message: MessageCallback) -> MessageChanne
         return SignalChannel(
             api_url=config.signal_api_url,
             phone_number=config.signal_number,
-            on_message=on_message,
+            message_agent=message_agent,
+            db=db,
         )
     else:
         raise ValueError(f"Unknown channel type: {config.channel_type}")
@@ -46,7 +61,6 @@ def create_channel(config: Config, on_message: MessageCallback) -> MessageChanne
 
 __all__ = [
     "MessageChannel",
-    "MessageCallback",
     "IncomingMessage",
     "SignalChannel",
     "DiscordChannel",

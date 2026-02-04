@@ -1,15 +1,18 @@
 """Signal implementation of MessageChannel."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import re
+from typing import TYPE_CHECKING
 
 import httpx
 import websockets
 from pydantic import ValidationError
 
-from penny.channels.base import IncomingMessage, MessageCallback, MessageChannel
+from penny.channels.base import IncomingMessage, MessageChannel
 from penny.channels.signal.models import (
     HttpMethod,
     SendMessageRequest,
@@ -17,24 +20,35 @@ from penny.channels.signal.models import (
     TypingIndicatorRequest,
 )
 
+if TYPE_CHECKING:
+    from penny.agent import MessageAgent
+    from penny.database import Database
+
 logger = logging.getLogger(__name__)
 
 
 class SignalChannel(MessageChannel):
     """Signal messenger channel implementation."""
 
-    def __init__(self, api_url: str, phone_number: str, on_message: MessageCallback):
+    def __init__(
+        self,
+        api_url: str,
+        phone_number: str,
+        message_agent: MessageAgent,
+        db: Database,
+    ):
         """
         Initialize Signal channel.
 
         Args:
             api_url: Base URL for signal-cli-rest-api (e.g., http://localhost:8080)
             phone_number: Registered Signal phone number
-            on_message: Callback for incoming messages
+            message_agent: Agent for processing incoming messages
+            db: Database for logging messages
         """
+        super().__init__(message_agent=message_agent, db=db)
         self.api_url = api_url.rstrip("/")
         self.phone_number = phone_number
-        self._on_message = on_message
         self._running = True
         self.http_client = httpx.AsyncClient(timeout=30.0)
         logger.info("Initialized Signal channel: url=%s, number=%s", api_url, phone_number)
@@ -67,7 +81,7 @@ class SignalChannel(MessageChannel):
                             envelope = json.loads(message)
                             logger.info("Parsed envelope with keys: %s", envelope.keys())
 
-                            asyncio.create_task(self._on_message(envelope))
+                            asyncio.create_task(self.handle_message(envelope))
 
                         except TimeoutError:
                             logger.debug("WebSocket receive timeout, continuing...")

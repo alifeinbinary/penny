@@ -2,17 +2,16 @@
 
 import asyncio
 import logging
-import random
 import signal
 import sys
-import time
 from typing import Any
 
-from penny.agent import Agent, ContinueAgent, MessageAgent, SummarizeAgent
+from penny.agent import Agent, FollowupAgent, MessageAgent, SummarizeAgent
 from penny.channels import MessageChannel, create_channel
 from penny.config import Config, setup_logging
-from penny.constants import SUMMARIZE_PROMPT, SYSTEM_PROMPT, MessageDirection
+from penny.constants import SUMMARIZE_PROMPT, SYSTEM_PROMPT
 from penny.database import Database
+from penny.scheduler import BackgroundScheduler, IdleSchedule, TwoPhaseSchedule
 from penny.tools import SearchTool
 
 logger = logging.getLogger(__name__)
@@ -24,7 +23,6 @@ class Penny:
     def __init__(self, config: Config, channel: MessageChannel | None = None):
         """Initialize the agent with configuration."""
         self.config = config
-        self.channel = channel or create_channel(config, on_message=self.handle_message)
         self.db = Database(config.db_path)
         self.db.create_tables()
 
@@ -44,7 +42,7 @@ class Penny:
             retry_delay=config.ollama_retry_delay,
         )
 
-        self.continue_agent = ContinueAgent(
+        self.followup_agent = FollowupAgent(
             system_prompt=SYSTEM_PROMPT,
             model=config.ollama_model,
             ollama_api_url=config.ollama_api_url,
@@ -66,9 +64,30 @@ class Penny:
             retry_delay=config.ollama_retry_delay,
         )
 
-        self.running = True
-        self.last_message_time = time.monotonic()
-        self._continue_cancel: asyncio.Event = asyncio.Event()
+        # Create channel (needs message_agent and db)
+        self.channel = channel or create_channel(
+            config=config,
+            message_agent=self.message_agent,
+            db=self.db,
+        )
+
+        # Connect followup_agent to channel for sending responses
+        self.followup_agent.set_channel(self.channel)
+
+        # Create schedules (priority order: summarize first - quick, continue second - slow)
+        schedules = [
+            IdleSchedule(agent=self.summarize_agent, idle_seconds=config.summarize_idle_seconds),
+            TwoPhaseSchedule(
+                agent=self.followup_agent,
+                idle_seconds=config.followup_idle_seconds,
+                min_delay=config.followup_min_seconds,
+                max_delay=config.followup_max_seconds,
+            ),
+        ]
+        self.scheduler = BackgroundScheduler(schedules=schedules)
+
+        # Connect scheduler to channel for message notifications
+        self.channel.set_scheduler(self.scheduler)
 
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -76,186 +95,7 @@ class Penny:
     def _signal_handler(self, signum: int, frame: Any) -> None:
         """Handle shutdown signals."""
         logger.info("Received shutdown signal, stopping agent...")
-        self.running = False
-
-    async def _typing_loop(self, recipient: str, interval: float = 4.0) -> None:
-        """Send typing indicators on a loop until cancelled."""
-        try:
-            while True:
-                await self.channel.send_typing(recipient, True)
-                await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            pass
-
-    async def handle_message(self, envelope_data: dict) -> None:
-        """Process an incoming message through the agent controller."""
-        try:
-            self.last_message_time = time.monotonic()
-            self._continue_cancel.set()
-
-            message = self.channel.extract_message(envelope_data)
-            if message is None:
-                return
-
-            logger.info("Received message from %s: %s", message.sender, message.content)
-
-            typing_task = asyncio.create_task(self._typing_loop(message.sender))
-            try:
-                # Agent handles context preparation internally
-                parent_id, response = await self.message_agent.handle(
-                    content=message.content,
-                    quoted_text=message.quoted_text,
-                )
-
-                # Log incoming message linked to parent
-                incoming_id = self.db.log_message(
-                    MessageDirection.INCOMING, message.sender, message.content, parent_id=parent_id
-                )
-
-                answer = (
-                    response.answer.strip()
-                    if response.answer
-                    else "Sorry, I couldn't generate a response."
-                )
-                self.db.log_message(
-                    MessageDirection.OUTGOING,
-                    self.channel.sender_id,
-                    answer,
-                    parent_id=incoming_id,
-                )
-                await self.channel.send_message(
-                    message.sender, answer, attachments=response.attachments or None
-                )
-            finally:
-                typing_task.cancel()
-                await self.channel.send_typing(message.sender, False)
-
-        except Exception as e:
-            logger.exception("Error handling message: %s", e)
-
-    async def summarize_threads(self) -> None:
-        """Background loop: summarize unsummarized threads when idle."""
-        while self.running:
-            await asyncio.sleep(1)
-
-            idle_seconds = time.monotonic() - self.last_message_time
-            if idle_seconds < self.config.summarize_idle_seconds:
-                continue
-
-            unsummarized = self.db.get_unsummarized_messages()
-            if not unsummarized:
-                continue
-
-            logger.info("Idle for %.0fs, summarizing %d threads", idle_seconds, len(unsummarized))
-
-            for msg in unsummarized:
-                if not self.running:
-                    break
-
-                # Skip if no longer idle (new message came in)
-                if time.monotonic() - self.last_message_time < self.config.summarize_idle_seconds:
-                    logger.info("No longer idle, pausing summarization")
-                    break
-
-                assert msg.id is not None
-                try:
-                    summary = await self.summarize_agent.summarize(msg.id)
-                    if summary is not None:
-                        self.db.set_parent_summary(msg.id, summary)
-                        logger.info(
-                            "Summarized thread for message %d (length: %d)", msg.id, len(summary)
-                        )
-                except Exception as e:
-                    logger.error("Failed to summarize thread for message %d: %s", msg.id, e)
-
-    async def continue_conversations(self) -> None:
-        """Background loop: spontaneously continue a dangling conversation.
-
-        Logic:
-        1. Wait until idle for idle_time (reset if message received)
-        2. Start random timer between min and max (cancel if message received)
-        3. When timer completes, send continuation
-        """
-        while self.running:
-            # Phase 1: Wait for idle threshold
-            logger.info("Continuation: waiting for %.0fs idle", self.config.continue_idle_seconds)
-            while self.running:
-                self._continue_cancel.clear()
-                idle_seconds = time.monotonic() - self.last_message_time
-                if idle_seconds >= self.config.continue_idle_seconds:
-                    break
-                remaining = self.config.continue_idle_seconds - idle_seconds
-                try:
-                    await asyncio.wait_for(self._continue_cancel.wait(), timeout=remaining)
-                    # Message received, loop back to check idle again
-                    logger.info("Continuation: idle reset by incoming message")
-                    continue
-                except TimeoutError:
-                    # Idle threshold reached
-                    break
-
-            if not self.running:
-                break
-
-            # Phase 2: Random delay timer (cancellable)
-            self._continue_cancel.clear()
-            delay = random.uniform(
-                self.config.continue_min_seconds, self.config.continue_max_seconds
-            )
-            logger.info("Continuation: idle threshold reached, timer started (%.0fs)", delay)
-            try:
-                await asyncio.wait_for(self._continue_cancel.wait(), timeout=delay)
-                # Message received, go back to phase 1
-                logger.info("Continuation: timer cancelled by incoming message")
-                continue
-            except TimeoutError:
-                # Timer completed
-                logger.info("Continuation: timer completed, sending message")
-                pass
-
-            if not self.running:
-                break
-
-            leaves = self.db.get_conversation_leaves()
-            if not leaves:
-                logger.debug("No conversation leaves to continue")
-                continue
-
-            leaf = random.choice(leaves)
-            assert leaf.id is not None
-
-            try:
-                recipient, response = await self.continue_agent.continue_conversation(leaf.id)
-                if not recipient or not response:
-                    logger.debug("Could not continue conversation for leaf message %d", leaf.id)
-                    continue
-
-                logger.info(
-                    "Spontaneously continuing conversation (leaf=%d, recipient=%s)",
-                    leaf.id,
-                    recipient,
-                )
-
-                answer = response.answer.strip() if response.answer else None
-                if not answer:
-                    continue
-
-                typing_task = asyncio.create_task(self._typing_loop(recipient))
-                try:
-                    self.db.log_message(
-                        MessageDirection.OUTGOING,
-                        self.channel.sender_id,
-                        answer,
-                        parent_id=leaf.id,
-                    )
-                    await self.channel.send_message(
-                        recipient, answer, attachments=response.attachments or None
-                    )
-                finally:
-                    typing_task.cancel()
-                    await self.channel.send_typing(recipient, False)
-            except Exception as e:
-                logger.exception("Error in spontaneous continuation: %s", e)
+        self.scheduler.stop()
 
     async def run(self) -> None:
         """Run the agent."""
@@ -266,8 +106,7 @@ class Penny:
         try:
             await asyncio.gather(
                 self.channel.listen(),
-                self.summarize_threads(),
-                self.continue_conversations(),
+                self.scheduler.run(),
             )
         finally:
             await self.shutdown()
@@ -275,6 +114,7 @@ class Penny:
     async def shutdown(self) -> None:
         """Clean shutdown of resources."""
         logger.info("Shutting down agent...")
+        self.scheduler.stop()
         await self.channel.close()
         await Agent.close_all()
         logger.info("Agent shutdown complete")
@@ -289,11 +129,12 @@ async def main() -> None:
     logger.info("  channel_type: %s", config.channel_type)
     logger.info("  ollama_model: %s", config.ollama_model)
     logger.info("  ollama_api_url: %s", config.ollama_api_url)
+    logger.info("  summarize_idle: %.0fs", config.summarize_idle_seconds)
     logger.info(
-        "  continue_idle: %.0fs, continue_range: %.0fs-%.0fs",
-        config.continue_idle_seconds,
-        config.continue_min_seconds,
-        config.continue_max_seconds,
+        "  followup_idle: %.0fs, followup_range: %.0fs-%.0fs",
+        config.followup_idle_seconds,
+        config.followup_min_seconds,
+        config.followup_max_seconds,
     )
 
     agent = Penny(config)
