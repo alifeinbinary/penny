@@ -1,5 +1,6 @@
 # Penny
 **Your private, personalized internet companion.**
+
 **Author:** Jared Lockhart
 
 [![CI](https://github.com/jaredlockhart/penny/actions/workflows/check.yml/badge.svg)](https://github.com/jaredlockhart/penny/actions/workflows/check.yml)
