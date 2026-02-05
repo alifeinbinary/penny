@@ -1,0 +1,20 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create runtime files for volume mounts
+        run: |
+          touch .env
+          mkdir -p data
+
+      - run: make check
