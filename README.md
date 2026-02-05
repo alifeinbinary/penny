@@ -152,7 +152,7 @@ make fix         # Format + autofix lint issues
 make typecheck   # Type check with ty
 ```
 
-All dev tool commands run in temporary Docker containers via `docker-compose run --rm`, with source volume-mounted so changes write back to the host filesystem.
+All dev tool commands run in temporary Docker containers via `docker compose run --rm`, with source volume-mounted so changes write back to the host filesystem.
 
 ## Configuration
 
@@ -248,7 +248,7 @@ Penny auto-detects which channel to use based on configured credentials:
    DISCORD_CHANNEL_ID="your-channel-id"
    ```
 
-## Testing
+## Testing & CI
 
 Penny includes end-to-end integration tests that mock all external services:
 
@@ -256,6 +256,8 @@ Penny includes end-to-end integration tests that mock all external services:
 make pytest      # Run all tests
 make check       # Run format, lint, typecheck, and tests
 ```
+
+CI runs `make check` in Docker on every push to `main` and on pull requests via GitHub Actions.
 
 **Test Coverage:**
 - Message flow: tool calls, direct responses, typing indicators, DB logging
@@ -306,10 +308,6 @@ To reliably look up the original message:
 - Messages are limited to 2000 characters (auto-chunked if longer)
 - Typing indicators auto-expire after ~10 seconds
 - Bot ignores its own messages and messages from other bots
-
-## Inspiration
-
-Based on learnings from openclaw — built to be simpler, cleaner, and more maintainable.
 
 ## License
 
