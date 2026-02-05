@@ -1,5 +1,6 @@
 # Penny
 **Your private, personalized internet companion.**
+<br>
 
 **Author:** Jared Lockhart
 
