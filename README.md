@@ -1,4 +1,6 @@
 # Penny
+**Your private, personalized internet companion.**
+**Author:** Jared Lockhart
 
 [![CI](https://github.com/jaredlockhart/penny/actions/workflows/check.yml/badge.svg)](https://github.com/jaredlockhart/penny/actions/workflows/check.yml)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)
@@ -6,10 +8,6 @@
 ![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-blueviolet)
 ![Signal](https://img.shields.io/badge/Signal-messaging-3a76f0)
 ![Discord](https://img.shields.io/badge/Discord-bot-5865f2)
-
-A local-first AI agent that communicates via Signal or Discord and runs entirely on your machine.
-
-**Author:** Jared Lockhart
 
 <p align="center">
   <img src="penny1.png" alt="Penny screenshot 1" width="220">
@@ -19,26 +17,11 @@ A local-first AI agent that communicates via Signal or Discord and runs entirely
 
 ## Overview
 
-Penny is a personal AI agent built with simplicity and privacy in mind. It runs locally, uses open-source models via Ollama, and communicates through Signal or Discord for a secure, familiar interface.
+Ask Penny anything and she'll search the web and text you back, always with sources.
 
-**How it works:**
+But she's not just a question-answering bot. She pays attention. She remembers your conversations, learns what you're into, and starts sharing things she thinks you'd like on her own. She follows up on old topics when she finds something new. She gets to know you over time and her responses get more personal because of it.
 
-You send a message on Signal or Discord. Penny searches the web via Perplexity and finds a relevant image via DuckDuckGo — both in parallel — then responds in a casual, lowercase style with the image attached. If you reply to one of Penny's messages, it rebuilds the conversation thread for context.
-
-**Key Features:**
-- **Multi-Platform**: Works with Signal (via signal-cli-rest-api) or Discord (via discord.py)
-- **Perplexity Search**: Every response is grounded in a web search — Penny never answers from model knowledge alone
-- **Image Attachments**: Every response includes a relevant image from DuckDuckGo (degrades gracefully if unavailable)
-- **Source URLs**: URLs extracted from Perplexity search results, presented as a Sources list so the model picks the most relevant one
-- **Thread-Based Context**: Quote-reply to continue a conversation; Penny walks the message chain to rebuild history
-- **Spontaneous Followups**: Penny randomly follows up on idle conversations by searching for something new about the topic (configurable idle timeout and random delay)
-- **Proactive Discovery**: Penny shares new content based on user interests — searches for things users would enjoy and sends them unprompted
-- **User Profiles**: Background task builds personality profiles from message history (interests, preferences, communication patterns) and injects them into conversation context
-- **Thread Summarization**: Background task summarizes idle threads via Ollama and caches the summary for future context
-- **Dual Model Support**: Separate models for user-facing messages (fast) and background tasks (smart) via `OLLAMA_FOREGROUND_MODEL` / `OLLAMA_BACKGROUND_MODEL`
-- **Full Logging**: Every Ollama prompt, Perplexity search, and user/agent message is logged to SQLite
-- **Agent Loop**: Multi-step reasoning with tool calling (up to 5 steps), with duplicate tool call protection
-- **Retry on Failure**: Ollama client retries up to 3 times on transient errors (configurable)
+Penny is a feed only for you.  Private, personal, and local.
 
 ## Architecture
 
