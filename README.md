@@ -248,6 +248,24 @@ Penny auto-detects which channel to use based on configured credentials:
    DISCORD_CHANNEL_ID="your-channel-id"
    ```
 
+## Testing
+
+Penny includes end-to-end integration tests that mock all external services:
+
+```bash
+make pytest      # Run all tests
+make check       # Run format, lint, typecheck, and tests
+```
+
+**Test Coverage:**
+- Message flow: tool calls, direct responses, typing indicators, DB logging
+- Background tasks: summarization, user profile generation, spontaneous followups
+
+Tests use mock servers and SDK patches:
+- `MockSignalServer`: Simulates Signal WebSocket + REST API
+- `MockOllamaAsyncClient`: Configurable LLM responses
+- `MockPerplexity`, `MockDDGS`: Search API mocks
+
 ## Code Style
 
 - **Pydantic for all structured data**: All structured data (API payloads, config, internal messages) must be brokered through Pydantic models — no raw dicts
