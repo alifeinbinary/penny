@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Starts Penny, tails logs, and auto-restarts when main has new commits.
+# Tails logs and auto-restarts Penny when main has new commits.
+# Called by `make deploy` after initial startup.
 #
 # Usage:
 #   ./scripts/deploy-watch.sh              # Check for updates every 5 minutes
@@ -23,10 +24,7 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-# Start penny
-log "starting penny in $DIR"
-docker compose up -d --build
-log "penny started (checking for updates every ${INTERVAL}s)"
+log "watching for updates (every ${INTERVAL}s)"
 
 # Background: poll git for changes and restart on new commits
 (

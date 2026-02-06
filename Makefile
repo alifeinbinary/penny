@@ -2,7 +2,7 @@ DC = docker compose run --rm penny
 
 DEPLOY_INTERVAL ?= 300
 
-.PHONY: up test prod kill build fmt lint fix typecheck check pytest deploy
+.PHONY: up test prod kill build fmt lint fix typecheck check pytest
 
 up:
 	docker compose up --build
@@ -14,7 +14,8 @@ test:
 
 prod:
 	cp .env.prod .env
-	docker compose up --build
+	docker compose up -d --build
+	@./scripts/deploy-watch.sh $(DEPLOY_INTERVAL)
 
 kill:
 	docker compose down --rmi local --remove-orphans
@@ -44,7 +45,3 @@ check: build
 pytest: build
 	$(DC) pytest penny/tests/ -v
 
-deploy:
-	@echo "Starting Penny with auto-deploy (checking every $(DEPLOY_INTERVAL)s)..."
-	docker compose up -d --build
-	@./scripts/deploy-watch.sh $(DEPLOY_INTERVAL)
