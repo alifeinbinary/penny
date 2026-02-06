@@ -5,9 +5,9 @@ Python-based orchestrator that manages autonomous Claude CLI agents. Each agent 
 ## Quick Start
 
 ```bash
-python agents/orchestrator.py              # Run continuously
-python agents/orchestrator.py --once       # Run all due agents once and exit
-python agents/orchestrator.py --list       # Show registered agents
+uv run --python 3.12 agents/orchestrator.py              # Run continuously
+uv run --python 3.12 agents/orchestrator.py --once       # Run all due agents once and exit
+uv run --python 3.12 agents/orchestrator.py --list       # Show registered agents
 ```
 
 ## How It Works
@@ -15,11 +15,12 @@ python agents/orchestrator.py --list       # Show registered agents
 The orchestrator loops every 30 seconds, checking which agents are due to run. When an agent is due, it:
 
 1. Reads the agent's `CLAUDE.md` prompt
-2. Calls `claude -p <prompt> --dangerously-skip-permissions`
-3. Captures output to `agents/logs/<agent-name>.log`
-4. Records success/failure and duration
+2. Calls `claude -p <prompt> --dangerously-skip-permissions --verbose --output-format stream-json`
+3. Streams JSON events in real-time, logging tool calls and text output as they happen
+4. Captures final output to `agents/logs/<agent-name>.log`
+5. Records success/failure and duration
 
-Ctrl+C stops the orchestrator cleanly.
+Output streams to the terminal in real-time so you can watch agents work. Ctrl+C stops the orchestrator cleanly.
 
 ## Agents
 
@@ -32,14 +33,27 @@ agents/
   logs/                    # Per-agent output logs (gitignored)
   product-manager/
     CLAUDE.md              # PM agent prompt
+  worker/
+    CLAUDE.md              # Worker agent prompt
 ```
 
 ### Product Manager
 
-Monitors GitHub Issues on a 1-hour cycle:
-- Expands `idea`-labeled issues into detailed specs
-- Responds to feedback on `draft`-labeled issues
+Monitors GitHub Issues on a 1-hour cycle (600s timeout):
+- Scans for `idea`-labeled issues and expands them into detailed specs
+- Responds to user feedback on `draft`-labeled issues
+- Promotes specs to `approved` when ready for implementation
 - All interaction via GitHub Issue comments and labels
+
+### Worker
+
+Implements approved features on a 30-minute cycle (1800s timeout):
+- Checks for `in-progress` work first (resumes interrupted cycles)
+- Picks up `approved` issues and claims them (`in-progress`)
+- Reads the spec, creates a feature branch (`issue-<N>-<slug>`), writes code and tests
+- Runs `make check` to validate (format, lint, typecheck, tests) — retries up to 3 times
+- Creates a PR with `Closes #N` linking back to the issue
+- Labels issue `review` when PR is ready
 
 ## Adding a New Agent
 
@@ -76,6 +90,15 @@ The `Agent` class accepts:
 | `timeout_seconds` | 600 | Max runtime before killing the process |
 | `model` | None | Override Claude model (e.g. "opus") |
 | `allowed_tools` | None | Restrict which tools Claude can use |
+
+## Streaming Output
+
+The orchestrator uses `--verbose --output-format stream-json` to get real-time output from Claude CLI. Events are parsed and logged as they arrive:
+
+- **`assistant`** events — agent text and tool calls (e.g. `[worker] [tool] Bash`)
+- **`result`** events — final output captured for the per-agent log file
+
+This means you can watch agents think, call tools, and produce output live in the terminal rather than waiting for the full run to complete.
 
 ## Logs
 

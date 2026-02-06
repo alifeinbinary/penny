@@ -34,8 +34,13 @@ def get_agents() -> list[Agent]:
             interval_seconds=3600,
             timeout_seconds=600,
         ),
+        Agent(
+            name="worker",
+            prompt_path=AGENTS_DIR / "worker" / "CLAUDE.md",
+            interval_seconds=1800,
+            timeout_seconds=1800,
+        ),
         # Future agents:
-        # Agent(name="project-manager", ...),
         # Agent(name="quality", ...),
     ]
 

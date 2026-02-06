@@ -6,9 +6,9 @@ The orchestrator manages agent lifecycles and scheduling.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +61,8 @@ class Agent:
             "-p",
             prompt,
             "--dangerously-skip-permissions",
+            "--verbose",
+            "--output-format", "stream-json",
         ]
         if self.model:
             cmd.extend(["--model", self.model])
@@ -81,15 +83,23 @@ class Agent:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
                 cwd=str(self.working_dir),
             )
 
-            output_lines = []
+            result_text = ""
             assert process.stdout is not None
             for line in process.stdout:
-                line = line.rstrip("\n")
-                logger.info(f"[{self.name}] {line}")
-                output_lines.append(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    self._log_event(event)
+                    if event.get("type") == "result":
+                        result_text = event.get("result", "")
+                except json.JSONDecodeError:
+                    logger.info(f"[{self.name}] {line}")
 
             process.wait(timeout=self.timeout_seconds)
 
@@ -98,15 +108,13 @@ class Agent:
             self.run_count += 1
 
             success = process.returncode == 0
-            output = "\n".join(output_lines)
-
             level = logging.INFO if success else logging.ERROR
             logger.log(level, f"[{self.name}] Cycle #{self.run_count} {'OK' if success else 'FAILED'} in {duration:.1f}s")
 
             return AgentRun(
                 agent_name=self.name,
                 success=success,
-                output=output,
+                output=result_text,
                 duration=duration,
                 timestamp=start,
             )
@@ -124,3 +132,21 @@ class Agent:
                 duration=duration,
                 timestamp=start,
             )
+
+    def _log_event(self, event: dict) -> None:
+        """Log a stream-json event in a human-readable way."""
+        event_type = event.get("type", "")
+
+        if event_type == "assistant":
+            # Assistant text output
+            for block in event.get("message", {}).get("content", []):
+                if block.get("type") == "text":
+                    for text_line in block["text"].split("\n"):
+                        logger.info(f"[{self.name}] {text_line}")
+                elif block.get("type") == "tool_use":
+                    tool_name = block.get("name", "?")
+                    logger.info(f"[{self.name}] [tool] {tool_name}")
+
+        elif event_type == "result":
+            for text_line in event.get("result", "").split("\n"):
+                logger.info(f"[{self.name}] {text_line}")
