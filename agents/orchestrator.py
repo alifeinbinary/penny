@@ -31,14 +31,16 @@ def get_agents() -> list[Agent]:
         Agent(
             name="product-manager",
             prompt_path=AGENTS_DIR / "product-manager" / "CLAUDE.md",
-            interval_seconds=3600,
+            interval_seconds=300,
             timeout_seconds=600,
+            required_labels=["idea", "draft"],
         ),
         Agent(
             name="worker",
             prompt_path=AGENTS_DIR / "worker" / "CLAUDE.md",
-            interval_seconds=1800,
+            interval_seconds=300,
             timeout_seconds=1800,
+            required_labels=["approved", "in-progress"],
         ),
         # Future agents:
         # Agent(name="quality", ...),
@@ -102,8 +104,11 @@ def main() -> None:
 
     if args.once:
         for agent in agents:
-            result = agent.run()
-            save_agent_log(agent.name, agent.run_count, result.timestamp, result.duration, result.success, result.output)
+            if agent.has_work():
+                result = agent.run()
+                save_agent_log(agent.name, agent.run_count, result.timestamp, result.duration, result.success, result.output)
+            else:
+                logger.info(f"[{agent.name}] No matching issues, skipping")
         return
 
     # Main loop — check agents every 30s, run those that are due
@@ -114,8 +119,12 @@ def main() -> None:
             if not running:
                 break
             if agent.is_due():
-                result = agent.run()
-                save_agent_log(agent.name, agent.run_count, result.timestamp, result.duration, result.success, result.output)
+                if agent.has_work():
+                    result = agent.run()
+                    save_agent_log(agent.name, agent.run_count, result.timestamp, result.duration, result.success, result.output)
+                else:
+                    logger.info(f"[{agent.name}] No matching issues, skipping")
+                    agent.last_run = datetime.now()
 
         # Sleep in 1s increments so signals are responsive
         for _ in range(TICK_SECONDS):

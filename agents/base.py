@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 CLAUDE_CLI = Path.home() / ".local" / "bin" / "claude"
+GH_CLI = Path("/opt/homebrew/bin/gh")
 PROJECT_ROOT = Path(__file__).parent.parent
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class Agent:
         timeout_seconds: int = 600,
         model: str | None = None,
         allowed_tools: list[str] | None = None,
+        required_labels: list[str] | None = None,
     ):
         self.name = name
         self.prompt_path = prompt_path
@@ -46,6 +48,7 @@ class Agent:
         self.timeout_seconds = timeout_seconds
         self.model = model
         self.allowed_tools = allowed_tools
+        self.required_labels = required_labels
         self.last_run: datetime | None = None
         self.run_count = 0
 
@@ -54,6 +57,29 @@ class Agent:
             return True
         elapsed = (datetime.now() - self.last_run).total_seconds()
         return elapsed >= self.interval_seconds
+
+    def has_work(self) -> bool:
+        """Check if there are GitHub issues matching any required label.
+
+        Returns True if no labels are configured (always run) or if any
+        label has at least one open issue.
+        """
+        if not self.required_labels:
+            return True
+
+        for label in self.required_labels:
+            try:
+                result = subprocess.run(
+                    [str(GH_CLI), "issue", "list", "--label", label, "--json", "number", "--limit", "1"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0 and result.stdout.strip() not in ("", "[]"):
+                    return True
+            except (subprocess.TimeoutExpired, OSError):
+                # If gh fails, run the agent anyway to be safe
+                return True
+
+        return False
 
     def _build_command(self, prompt: str) -> list[str]:
         cmd = [
