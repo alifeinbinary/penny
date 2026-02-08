@@ -11,12 +11,50 @@ services:
 
   penny:
     build: ./app
+    image: penny
     restart: unless-stopped
     volumes:
-      - ./app/penny:/app/penny
-      - ./app/pyproject.toml:/app/pyproject.toml
       - ./data:/app/data
       - ./.env:/app/.env
     environment:
       - PYTHONUNBUFFERED=1
       - SIGNAL_API_URL=http://signal-api:8080
+
+  pm:
+    build: ./agents
+    restart: unless-stopped
+    profiles: [team]
+    command: ["--agent", "product-manager"]
+    volumes:
+      - .:/repo
+      - ./data:/repo/data
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOCAL=1
+
+  worker:
+    build: ./agents
+    restart: unless-stopped
+    profiles: [team]
+    stop_grace_period: 120s
+    command: ["--agent", "worker"]
+    volumes:
+      - .:/repo
+      - ./data:/repo/data
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOCAL=1
+
+  watcher:
+    build: ./scripts/watcher
+    restart: unless-stopped
+    profiles: [team]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/repo
+    environment:
+      - DEPLOY_INTERVAL=300
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-penny}
+    working_dir: /repo

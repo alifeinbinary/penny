@@ -11,7 +11,7 @@ Usage:
 
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["PyJWT[crypto]"]
+# dependencies = ["PyJWT[crypto]", "python-dotenv"]
 # ///
 
 from __future__ import annotations
@@ -46,9 +46,13 @@ def load_github_app() -> GitHubApp | None:
     if not all([app_id, key_path, install_id]):
         return None
 
+    key_file = Path(key_path)
+    if not key_file.is_absolute():
+        key_file = PROJECT_ROOT / key_file
+
     return GitHubApp(
         app_id=int(app_id),
-        private_key_path=Path(key_path),
+        private_key_path=key_file,
         installation_id=int(install_id),
     )
 
@@ -126,11 +130,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Penny Agent Orchestrator")
     parser.add_argument("--once", action="store_true", help="Run all due agents once and exit")
     parser.add_argument("--list", action="store_true", help="List registered agents and exit")
+    parser.add_argument("--agent", type=str, default=None, help="Run only the named agent (e.g. 'product-manager' or 'worker')")
     parser.add_argument("--log-file", type=Path, default=LOG_DIR / "orchestrator.log")
     args = parser.parse_args()
 
     setup_logging(args.log_file)
     logger = logging.getLogger(__name__)
+
+    # Load .env so orchestrator works without shell exports
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
 
     github_app = load_github_app()
     if github_app:
@@ -139,6 +148,12 @@ def main() -> None:
         logger.warning("No GitHub App configured — agents will use your personal gh auth")
 
     agents = get_agents(github_app)
+
+    if args.agent:
+        agents = [a for a in agents if a.name == args.agent]
+        if not agents:
+            logger.error(f"Unknown agent: {args.agent}")
+            sys.exit(1)
 
     if args.list:
         for agent in agents:
@@ -152,6 +167,15 @@ def main() -> None:
         nonlocal running
         logger.info("Shutdown signal received")
         running = False
+        # Forward SIGTERM to any running agent subprocess
+        for agent in agents:
+            proc = agent._process
+            if proc is not None and proc.poll() is None:
+                logger.info(f"Forwarding SIGTERM to [{agent.name}] subprocess (pid={proc.pid})")
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    logger.debug(f"Subprocess for [{agent.name}] already exited")
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)

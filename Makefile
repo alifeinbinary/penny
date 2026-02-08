@@ -1,51 +1,56 @@
-DC = docker compose run --rm penny
+# Check tool configuration (single source of truth for tool parameters)
+RUFF_TARGETS = penny/
+PYTEST_ARGS = penny/tests/ -v
 
-DEPLOY_INTERVAL ?= 300
+.PHONY: up prod kill build fmt lint fix typecheck check pytest token
 
-.PHONY: up test prod kill build fmt lint fix typecheck check pytest team
+# --- Docker Compose ---
 
 up:
-	docker compose up --build
-
-test:
-	cp data/penny.db data/test.db 2>/dev/null || true
-	cp .env.test .env
-	docker compose up --build
+	docker compose --profile team up --build
 
 prod:
-	cp .env.prod .env
-	docker compose up -d --build
-	@./scripts/deploy-watch.sh $(DEPLOY_INTERVAL)
+	docker compose -f docker-compose.yml up --build penny
 
 kill:
-	docker compose down --rmi local --remove-orphans
+	docker compose --profile team down --rmi local --remove-orphans
 
 build:
 	docker compose build penny
 
-fmt: build
-	$(DC) ruff format penny/
+# Print a GitHub App installation token for use with gh CLI
+# Usage: GH_TOKEN=$(make token) gh pr create ...
+token:
+	@docker compose run --rm --no-deps --entrypoint "" pm uv run /repo/agents/github_app.py 2>/dev/null | grep GH_TOKEN | cut -d"'" -f2
 
-lint: build
-	$(DC) ruff check penny/
+# --- Code quality (auto-detects host vs container via LOCAL env var) ---
 
-fix: build
-	$(DC) ruff format penny/
-	$(DC) ruff check --fix penny/
+ifdef LOCAL
+# Inside a container — run tools directly from app/ subdir
+RUN = cd app &&
+else
+# On host — run tools inside the penny container
+RUN = docker compose run --rm penny
+endif
 
-typecheck: build
-	$(DC) ty check penny/
+fmt: $(if $(LOCAL),,build)
+	$(RUN) ruff format $(RUFF_TARGETS)
 
-check: build
-	$(DC) ruff format --check penny/
-	$(DC) ruff check penny/
-	$(DC) ty check penny/
-	$(DC) pytest penny/tests/ -v
+lint: $(if $(LOCAL),,build)
+	$(RUN) ruff check $(RUFF_TARGETS)
 
-pytest: build
-	$(DC) pytest penny/tests/ -v
+fix: $(if $(LOCAL),,build)
+	$(RUN) ruff format $(RUFF_TARGETS)
+	$(RUN) ruff check --fix $(RUFF_TARGETS)
 
-team:
-	eval "$$(uv run --python 3.12 --with 'PyJWT[crypto]' agents/github_app.py 2>/dev/null)" 2>/dev/null || true; \
-	uv run --python 3.12 agents/orchestrator.py
+typecheck: $(if $(LOCAL),,build)
+	$(RUN) ty check $(RUFF_TARGETS)
 
+check: $(if $(LOCAL),,build)
+	$(RUN) ruff format --check $(RUFF_TARGETS)
+	$(RUN) ruff check $(RUFF_TARGETS)
+	$(RUN) ty check $(RUFF_TARGETS)
+	$(RUN) pytest $(PYTEST_ARGS)
+
+pytest: $(if $(LOCAL),,build)
+	$(RUN) pytest $(PYTEST_ARGS)
