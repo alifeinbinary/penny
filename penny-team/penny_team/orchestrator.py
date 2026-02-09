@@ -25,38 +25,30 @@ from datetime import datetime
 from pathlib import Path
 
 from penny_team.base import Agent
+from penny_team.constants import (
+    AGENT_ARCHITECT,
+    AGENT_PM,
+    AGENT_WORKER,
+    ARCHITECT_INTERVAL,
+    ARCHITECT_TIMEOUT,
+    BOT_SUFFIX,
+    ENV_APP_ID,
+    ENV_FILENAME,
+    ENV_INSTALL_ID,
+    ENV_KEY_PATH,
+    ORCHESTRATOR_LOG,
+    PM_INTERVAL,
+    PM_TIMEOUT,
+    WORKER_INTERVAL,
+    WORKER_TIMEOUT,
+    Label,
+)
 from penny_team.utils.codeowners import parse_codeowners
-from penny_team.utils.github_app import BOT_SUFFIX, GitHubApp
+from penny_team.utils.github_app import GitHubApp
 
 AGENTS_DIR = Path(__file__).parent
 PROJECT_ROOT = AGENTS_DIR.parent.parent
 LOG_DIR = PROJECT_ROOT / "data" / "logs"
-ENV_FILENAME = ".env"
-ORCHESTRATOR_LOG = "orchestrator.log"
-
-# GitHub issue labels — each label maps to exactly one agent
-LABEL_REQUIREMENTS = "requirements"
-LABEL_SPECIFICATION = "specification"
-LABEL_IN_PROGRESS = "in-progress"
-LABEL_IN_REVIEW = "in-review"
-
-# Agent names
-AGENT_PM = "product-manager"
-AGENT_ARCHITECT = "architect"
-AGENT_WORKER = "worker"
-
-# Agent timing
-PM_INTERVAL = 300
-PM_TIMEOUT = 600
-ARCHITECT_INTERVAL = 300
-ARCHITECT_TIMEOUT = 600
-WORKER_INTERVAL = 300
-WORKER_TIMEOUT = 1800
-
-# Environment variable names
-ENV_APP_ID = "GITHUB_APP_ID"
-ENV_KEY_PATH = "GITHUB_APP_PRIVATE_KEY_PATH"
-ENV_INSTALL_ID = "GITHUB_APP_INSTALLATION_ID"
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +101,7 @@ def get_agents(github_app: GitHubApp | None = None) -> list[Agent]:
             name=AGENT_PM,
             interval_seconds=PM_INTERVAL,
             timeout_seconds=PM_TIMEOUT,
-            required_labels=[LABEL_REQUIREMENTS],
+            required_labels=[Label.REQUIREMENTS],
             github_app=github_app,
             trusted_users=trusted,
         ),
@@ -117,7 +109,7 @@ def get_agents(github_app: GitHubApp | None = None) -> list[Agent]:
             name=AGENT_ARCHITECT,
             interval_seconds=ARCHITECT_INTERVAL,
             timeout_seconds=ARCHITECT_TIMEOUT,
-            required_labels=[LABEL_SPECIFICATION],
+            required_labels=[Label.SPECIFICATION],
             github_app=github_app,
             trusted_users=trusted,
         ),
@@ -125,7 +117,7 @@ def get_agents(github_app: GitHubApp | None = None) -> list[Agent]:
             name=AGENT_WORKER,
             interval_seconds=WORKER_INTERVAL,
             timeout_seconds=WORKER_TIMEOUT,
-            required_labels=[LABEL_IN_PROGRESS, LABEL_IN_REVIEW],
+            required_labels=[Label.IN_PROGRESS, Label.IN_REVIEW, Label.BUG],
             github_app=github_app,
             trusted_users=trusted,
         ),
