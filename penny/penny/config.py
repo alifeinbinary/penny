@@ -1,11 +1,19 @@
 """Configuration management for Penny."""
 
+from __future__ import annotations
+
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
+
+from penny.config_params import RUNTIME_CONFIG_PARAMS
+
+if TYPE_CHECKING:
+    from penny.database import Database
 
 
 @dataclass
@@ -58,8 +66,10 @@ class Config:
     discovery_min_seconds: float = 7200.0
     discovery_max_seconds: float = 14400.0
 
+    _db: Database | None = None
+
     @classmethod
-    def load(cls) -> "Config":
+    def load(cls, db: Database | None = None) -> Config:
         """Load configuration from .env file."""
         # Load .env file from project root or /penny/.env in container
         env_paths = [
@@ -132,7 +142,7 @@ class Config:
         discovery_min_seconds = float(os.getenv("DISCOVERY_MIN_SECONDS", "7200"))
         discovery_max_seconds = float(os.getenv("DISCOVERY_MAX_SECONDS", "14400"))
 
-        return cls(
+        config = cls(
             channel_type=channel_type,
             signal_number=signal_number,
             signal_api_url=signal_api_url,
@@ -151,6 +161,72 @@ class Config:
             discovery_min_seconds=discovery_min_seconds,
             discovery_max_seconds=discovery_max_seconds,
         )
+
+        # Store database reference for runtime config lookups
+        config._db = db
+
+        return config
+
+    def _get_db_config(self, field_name: str) -> float | int | None:
+        """
+        Get a runtime config value from the database.
+
+        Args:
+            field_name: Field name to look up (lowercase with underscores)
+
+        Returns:
+            Parsed value from database, or None if not found
+        """
+        if self._db is None:
+            return None
+
+        # Map field name to config key (uppercase)
+        key = field_name.upper()
+        if key not in RUNTIME_CONFIG_PARAMS:
+            return None
+
+        from sqlmodel import Session, select
+
+        from penny.database.models import RuntimeConfig
+
+        with Session(self._db.engine) as session:
+            result = session.exec(select(RuntimeConfig).where(RuntimeConfig.key == key)).first()
+
+        if result is None:
+            return None
+
+        param = RUNTIME_CONFIG_PARAMS[key]
+        try:
+            return param.validator(result.value)
+        except ValueError:
+            # Invalid value in database, fall back to .env
+            return None
+
+    def __getattribute__(self, name: str) -> object:
+        """
+        Override attribute access to check database for runtime config overrides.
+
+        For runtime-configurable fields, database values take precedence over .env values.
+        """
+        # Get the base value from the dataclass
+        base_value = super().__getattribute__(name)
+
+        # Don't intercept private attributes or methods
+        if name.startswith("_") or callable(base_value):
+            return base_value
+
+        # Check if this is a runtime-configurable field
+        key = name.upper()
+        if key in RUNTIME_CONFIG_PARAMS:
+            # Try to get value from database
+            db = super().__getattribute__("_db")
+            if db is not None:
+                db_value = self._get_db_config(name)
+                if db_value is not None:
+                    return db_value
+
+        # Fall back to .env value
+        return base_value
 
 
 def setup_logging(log_level: str, log_file: str | None = None) -> None:
