@@ -408,7 +408,7 @@ async def test_signal_reaction_raw_format(
 
 @pytest.mark.asyncio
 async def test_startup_announcement(
-    signal_server, mock_ollama, test_config, _mock_search, running_penny
+    signal_server, mock_ollama, test_config, _mock_search, running_penny, monkeypatch
 ):
     """
     Test that Penny sends a startup announcement (wave emoji) when starting up.
@@ -437,6 +437,14 @@ async def test_startup_announcement(
     # Clear the outgoing messages from the first run
     signal_server.outgoing_messages.clear()
 
+    # Set commit message in environment variable (fallback case - no commit message)
+    monkeypatch.setenv("GIT_COMMIT_MESSAGE", "unknown")
+
+    # Configure mock_ollama for restart message generation (not used with fallback)
+    mock_ollama.set_default_flow(
+        final_response="I just restarted!",
+    )
+
     # Now start Penny again - it should send startup announcement
     async with running_penny(config) as penny:
         # Wait a bit for startup announcement to be sent
@@ -445,7 +453,8 @@ async def test_startup_announcement(
         # Verify startup announcement was sent
         assert len(signal_server.outgoing_messages) == 1
         startup_msg = signal_server.outgoing_messages[0]
-        assert startup_msg["message"] == "👋"
+        # Should start with wave and include restart message
+        assert startup_msg["message"].startswith("👋")
         assert TEST_SENDER in startup_msg["recipients"]
 
         # Verify the startup announcement was NOT logged to database
