@@ -72,7 +72,7 @@ GH_FIELD_UPDATED_AT = "updatedAt"
 GH_ISSUE_LIST_FIELDS = str(GH_FIELD_NUMBER)
 GH_ISSUE_VIEW_FIELDS = "title,body,author,comments,labels"
 GH_ISSUE_LIMIT = "20"
-GH_PR_FIELDS = "number,headRefName,statusCheckRollup,mergeable,reviews"
+GH_PR_FIELDS = "number,headRefName,statusCheckRollup,mergeable,reviews,comments"
 
 
 # =============================================================================
@@ -96,6 +96,9 @@ MERGE_STATUS_CONFLICTING = "CONFLICTING"
 
 # Max characters of failure log to include in prompt
 MAX_LOG_CHARS = 3000
+
+# Max times the worker will attempt to fix CI before pausing for human help
+MAX_CI_FIX_ATTEMPTS = 3
 
 
 # =============================================================================
@@ -131,6 +134,8 @@ CODEOWNERS_PATHS = [
 # =============================================================================
 
 GITHUB_API = "https://api.github.com"
+GITHUB_REPO_OWNER = "jaredlockhart"
+GITHUB_REPO_NAME = "penny"
 JWT_ALGORITHM = "RS256"
 BOT_SUFFIX = "[bot]"
 APP_PREFIX = "app/"
@@ -139,6 +144,7 @@ NOREPLY_DOMAIN = "users.noreply.github.com"
 # API paths
 API_APP = "/app"
 API_ACCESS_TOKENS = "/app/installations/{install_id}/access_tokens"
+API_PR_REVIEW_COMMENTS = "/repos/{owner}/{repo}/pulls/{pr_number}/comments"
 
 # Environment variable keys for bot identity
 ENV_GH_TOKEN = "GH_TOKEN"

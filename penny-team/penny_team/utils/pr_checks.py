@@ -12,13 +12,21 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import urllib.request
 from dataclasses import dataclass
 
+from pydantic import BaseModel, Field
+
 from penny_team.constants import (
+    API_PR_REVIEW_COMMENTS,
     CI_STATUS_FAILING,
     CI_STATUS_PASSING,
+    ENV_GH_TOKEN,
     GH_CLI,
     GH_PR_FIELDS,
+    GITHUB_API,
+    GITHUB_REPO_NAME,
+    GITHUB_REPO_OWNER,
     MAX_LOG_CHARS,
     MERGE_STATUS_CONFLICTING,
     PASSING_CONCLUSIONS,
@@ -29,6 +37,43 @@ from penny_team.constants import (
 from penny_team.utils.issue_filter import FilteredIssue
 
 logger = logging.getLogger(__name__)
+
+
+class CommentAuthor(BaseModel):
+    """Author of a PR comment or review."""
+
+    login: str = ""
+
+
+class PRComment(BaseModel):
+    """A top-level PR comment (from gh pr list --json comments)."""
+
+    author: CommentAuthor = CommentAuthor()
+    body: str = ""
+    created_at: str = Field("", alias="createdAt")
+
+
+class PRReview(BaseModel):
+    """A formal PR review (from gh pr list --json reviews)."""
+
+    author: CommentAuthor = CommentAuthor()
+    state: str = ""
+    submitted_at: str = Field("", alias="submittedAt")
+
+
+class ReviewCommentUser(BaseModel):
+    """Author of an inline PR review comment (REST API format)."""
+
+    login: str = ""
+
+
+class ReviewComment(BaseModel):
+    """An inline review comment on a pull request (from REST API)."""
+
+    user: ReviewCommentUser = ReviewCommentUser()
+    body: str = ""
+    path: str = ""
+    created_at: str = ""
 
 
 @dataclass
@@ -42,11 +87,16 @@ class FailedCheck:
 def enrich_issues_with_pr_status(
     issues: list[FilteredIssue],
     env: dict[str, str] | None = None,
+    bot_logins: set[str] | None = None,
+    processed_at: dict[str, str] | None = None,
 ) -> None:
     """Enrich in-review issues with CI check and merge conflict status from their PRs.
 
     Mutates FilteredIssue objects in place, setting ci_status,
     ci_failure_details, merge_conflict, and merge_conflict_branch.
+    When processed_at is provided, only review feedback newer than
+    the agent's last processing time is included (prevents re-addressing
+    already-handled comments).
     Fail-open: if gh fails, issues are left unchanged.
     """
     in_review = [i for i in issues if Label.IN_REVIEW in i.labels]
@@ -66,14 +116,36 @@ def enrich_issues_with_pr_status(
         if pr is None:
             continue
 
+        # Timestamp of when the agent last processed this issue —
+        # comments older than this have already been addressed.
+        since = (processed_at or {}).get(str(issue.number))
+
         # Merge conflict detection
         if pr.get("mergeable", "") == MERGE_STATUS_CONFLICTING:
             issue.merge_conflict = True
             issue.merge_conflict_branch = pr["headRefName"]
 
-        # Review feedback detection (latest review per reviewer wins)
-        if _has_changes_requested(pr.get("reviews", [])):
+        # Review feedback detection: formal reviews, top-level comments, or inline review comments
+        # Only include feedback newer than when we last processed this issue.
+        review_parts: list[str] = []
+
+        if _has_changes_requested(pr.get("reviews", []), since=since):
             issue.has_review_feedback = True
+
+        human_comments = _collect_human_comments(pr.get("comments", []), bot_logins, since=since)
+        if human_comments:
+            issue.has_review_feedback = True
+            review_parts.append("**PR comments:**\n")
+            review_parts.extend(human_comments)
+
+        inline_comments = _collect_human_review_comments(pr["number"], bot_logins, env, since=since)
+        if inline_comments:
+            issue.has_review_feedback = True
+            review_parts.append("**Inline review comments (on specific code lines):**\n")
+            review_parts.extend(inline_comments)
+
+        if review_parts:
+            issue.review_comments = "\n".join(review_parts)
 
         # CI check detection
         failed = _extract_failed_checks(pr.get("statusCheckRollup", []))
@@ -130,19 +202,85 @@ def _match_prs_to_issues(
     return result
 
 
-def _has_changes_requested(reviews: list[dict]) -> bool:
+def _has_changes_requested(raw_reviews: list[dict], since: str | None = None) -> bool:
     """Check if any reviewer's latest review requests changes.
 
     A reviewer might request changes then later approve. We only care
     about each reviewer's most recent review (last in the list).
+    When since is set, only reviews submitted after that ISO timestamp
+    count (already-addressed reviews are ignored).
     """
-    latest_by_reviewer: dict[str, str] = {}
-    for review in reviews:
-        login = review.get("author", {}).get("login", "")
-        state = review.get("state", "")
-        if login and state:
-            latest_by_reviewer[login] = state
-    return any(state == REVIEW_STATE_CHANGES_REQUESTED for state in latest_by_reviewer.values())
+    latest_by_reviewer: dict[str, PRReview] = {}
+    for raw in raw_reviews:
+        review = PRReview.model_validate(raw)
+        if review.author.login and review.state:
+            latest_by_reviewer[review.author.login] = review
+    for review in latest_by_reviewer.values():
+        if review.state == REVIEW_STATE_CHANGES_REQUESTED and (
+            since is None or not review.submitted_at or review.submitted_at > since
+        ):
+            return True
+    return False
+
+
+def _collect_human_review_comments(
+    pr_number: int,
+    bot_logins: set[str] | None,
+    env: dict[str, str] | None,
+    since: str | None = None,
+) -> list[str]:
+    """Fetch inline review comments from human (non-bot) users.
+
+    These are comments left on specific lines of code during a review,
+    which are not included in gh pr list --json comments or reviews.
+    When since is set, only comments created after that ISO timestamp
+    are included (filters out already-addressed feedback).
+    Fail-open: returns empty list if the API call fails.
+    """
+    try:
+        api_path = API_PR_REVIEW_COMMENTS.format(
+            owner=GITHUB_REPO_OWNER, repo=GITHUB_REPO_NAME, pr_number=pr_number
+        )
+        url = f"{GITHUB_API}{api_path}"
+        token = (env or {}).get(ENV_GH_TOKEN, "")
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw_comments = json.loads(resp.read())
+        parts: list[str] = []
+        for raw in raw_comments:
+            comment = ReviewComment.model_validate(raw)
+            if since and comment.created_at and comment.created_at <= since:
+                continue
+            if comment.user.login and (bot_logins is None or comment.user.login not in bot_logins):
+                location = f" (`{comment.path}`)" if comment.path else ""
+                parts.append(f"**{comment.user.login}**{location}:\n{comment.body}\n")
+        return parts
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+
+
+def _collect_human_comments(
+    raw_comments: list[dict],
+    bot_logins: set[str] | None,
+    since: str | None = None,
+) -> list[str]:
+    """Collect PR comments authored by human (non-bot) users.
+
+    When since is set, only comments created after that ISO timestamp
+    are included (filters out already-addressed feedback).
+    """
+    parts: list[str] = []
+    for raw in raw_comments:
+        comment = PRComment.model_validate(raw)
+        if not comment.author.login:
+            continue
+        if since and comment.created_at and comment.created_at <= since:
+            continue
+        if bot_logins is None or comment.author.login not in bot_logins:
+            parts.append(f"**{comment.author.login}**:\n{comment.body}\n")
+    return parts
 
 
 def _extract_failed_checks(status_rollup: list[dict]) -> list[FailedCheck]:
