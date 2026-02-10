@@ -65,17 +65,20 @@ data/                           — Runtime data (gitignored)
 The project runs inside Docker Compose. A top-level Makefile wraps all commands:
 
 ```bash
-make up          # Start all services (penny + team) with Docker Compose
-make prod        # Deploy penny only (no team, no override)
-make kill        # Tear down containers and remove local images
-make build       # Build the penny Docker image
-make team-build  # Build the penny-team Docker image
-make check       # Format check, lint, typecheck, and run tests (penny + penny-team)
-make pytest      # Run integration tests
-make fmt         # Format with ruff (penny + penny-team)
-make lint        # Lint with ruff (penny + penny-team)
-make fix         # Format + autofix lint issues (penny + penny-team)
-make typecheck   # Type check with ty (penny + penny-team)
+make up               # Start all services (penny + team) with Docker Compose
+make prod             # Deploy penny only (no team, no override)
+make kill             # Tear down containers and remove local images
+make build            # Build the penny Docker image
+make team-build       # Build the penny-team Docker image
+make token            # Generate GitHub App installation token for gh CLI
+make check            # Format check, lint, typecheck, and run tests (penny + penny-team)
+make pytest           # Run integration tests
+make fmt              # Format with ruff (penny + penny-team)
+make lint             # Lint with ruff (penny + penny-team)
+make fix              # Format + autofix lint issues (penny + penny-team)
+make typecheck        # Type check with ty (penny + penny-team)
+make migrate-test     # Test database migrations against a copy of prod DB
+make migrate-validate # Check for duplicate migration number prefixes
 ```
 
 On the host, dev tool commands run via `docker compose run --rm` in a temporary container (penny service for `penny/`, team service for `penny-team/`). Inside agent containers (where `LOCAL=1` is set), the same `make` targets run tools directly — no Docker-in-Docker needed.
@@ -139,6 +142,9 @@ GitHub Actions runs `make check` (format, lint, typecheck, tests) on every push 
 ## Design Principles
 
 - **Python-space over model-space**: When an action can be handled deterministically in Python (e.g., posting a comment, creating a label, validating output), do it in the orchestrator rather than relying on the model to use the right tool. Model-space logic is non-deterministic and harder to test. Reserve model-space for tasks that genuinely need reasoning (writing specs, analyzing code, generating responses).
+- **Pass parameters, don't swap state**: Never temporarily swap instance state (e.g., `self.db`) to change behavior. Pass the dependency as a parameter through the call chain. Refactor interfaces to accept parameters rather than mutating shared state.
+- **Capture static data at build time**: Data that doesn't change during a session (e.g., git commit info) should be captured at Docker build time via build args and environment variables, not parsed at runtime via subprocess calls.
+- **Initialize at startup, not in handlers**: Heavyweight setup (copying databases, creating resources) belongs at startup (entrypoint scripts, Makefile, build steps), not lazily inside message or request handlers.
 
 ## Code Style
 
