@@ -1,7 +1,11 @@
 """MessageAgent for handling incoming user messages."""
 
+import logging
+
 from penny.agent.base import Agent
 from penny.agent.models import ControllerResponse
+
+logger = logging.getLogger(__name__)
 
 
 class MessageAgent(Agent):
@@ -24,10 +28,13 @@ class MessageAgent(Agent):
         Returns:
             Tuple of (parent_id for thread linking, ControllerResponse with answer)
         """
+        # Get thread context if quoted
         parent_id = None
         history = None
         if quoted_text:
             parent_id, history = self.db.get_thread_context(quoted_text)
 
+        # Run agent
         response = await self.run(prompt=content, history=history)
+
         return parent_id, response
