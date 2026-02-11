@@ -22,6 +22,10 @@ class PreferenceType(StrEnum):
 LIKE_REACTIONS = ("❤️", "👍", "😆")
 DISLIKE_REACTIONS = ("😠", "👎", "😢")
 
+# Max messages/reactions the PreferenceAgent processes per user per wake cycle.
+# Keeps LLM prompts small; remaining items are processed on subsequent invocations.
+PREFERENCE_BATCH_LIMIT = 20
+
 
 SYSTEM_PROMPT = (
     "You are Penny, a chill search assistant. "
@@ -64,7 +68,7 @@ SUMMARIZE_PROMPT = (
     "Store all key points, facts, questions, and answers.\n\n"
 )
 
-PROFILE_PROMPT = (
+PREFERENCE_PROMPT = (
     "You are Penny, an AI assistant. "
     "Based on these messages from a user TO YOU, create a flat list of topics "
     "THE USER has mentioned or asked about (not yourself). "
