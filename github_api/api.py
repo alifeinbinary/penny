@@ -16,19 +16,79 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from penny_team.constants import (
-    API_ISSUE_COMMENTS,
-    API_JOB_LOGS,
-    API_PR_REVIEW_COMMENTS,
-    API_RUN_JOBS,
-    API_WORKFLOW_RUNS,
-    GITHUB_API,
-    GITHUB_REPO_NAME,
-    GITHUB_REPO_OWNER,
-    GQL_ISSUES_DETAILED,
-    GQL_ISSUES_LIGHTWEIGHT,
-    GQL_OPEN_PRS,
-)
+# GitHub API constants
+GITHUB_API = "https://api.github.com"
+
+# API paths
+API_ISSUE_COMMENTS = "/repos/{owner}/{repo}/issues/{number}/comments"
+API_PR_REVIEW_COMMENTS = "/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+API_WORKFLOW_RUNS = "/repos/{owner}/{repo}/actions/runs"
+API_RUN_JOBS = "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs"
+API_JOB_LOGS = "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+API_ISSUES = "/repos/{owner}/{repo}/issues"
+
+# GraphQL queries
+GQL_ISSUES_LIGHTWEIGHT = """
+query($owner: String!, $repo: String!, $label: String!, $limit: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issues(labels: [$label], states: OPEN, first: $limit,
+           orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number updatedAt }
+    }
+  }
+}
+"""
+
+GQL_ISSUES_DETAILED = """
+query($owner: String!, $repo: String!, $label: String!, $limit: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issues(labels: [$label], states: OPEN, first: $limit,
+           orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title body
+        author { login }
+        labels(first: 10) { nodes { name } }
+        comments(first: 50) {
+          nodes { author { login } body createdAt }
+        }
+      }
+    }
+  }
+}
+"""
+
+GQL_OPEN_PRS = """
+query($owner: String!, $repo: String!, $limit: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(states: OPEN, first: $limit) {
+      nodes {
+        number headRefName mergeable
+        reviews(first: 50) {
+          nodes { author { login } state submittedAt }
+        }
+        comments(first: 50) {
+          nodes { author { login } body createdAt }
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 50) {
+                  nodes {
+                    __typename
+                    ... on CheckRun { name conclusion status }
+                    ... on StatusContext { context state }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 logger = logging.getLogger(__name__)
 
@@ -297,7 +357,6 @@ class _GqlReviewNode(BaseModel):
     author: _GqlAuthor | None = None
     state: str = ""
     submitted_at: str = Field("", alias="submittedAt")
-    body: str = ""
 
 
 class _GqlReviewNodeList(BaseModel):
@@ -386,12 +445,7 @@ def _to_check_status(ctx: _GqlCheckContext) -> CheckStatus:
 def _to_pr_review(node: _GqlReviewNode) -> PRReview:
     author = node.author or _NULL_AUTHOR
     return PRReview.model_validate(
-        {
-            "author": {"login": author.login},
-            "state": node.state,
-            "submittedAt": node.submitted_at,
-            "body": node.body,
-        }
+        {"author": {"login": author.login}, "state": node.state, "submittedAt": node.submitted_at}
     )
 
 
@@ -432,8 +486,12 @@ class GitHubAPI:
     Actions API).
     """
 
-    def __init__(self, token_provider: Callable[[], str]) -> None:
+    def __init__(
+        self, token_provider: Callable[[], str], owner: str = "jaredlockhart", repo: str = "penny"
+    ) -> None:
         self._get_token = token_provider
+        self._owner = owner
+        self._repo = repo
 
     # --- Low-level request methods ---
 
@@ -490,8 +548,8 @@ class GitHubAPI:
         raw = self._graphql(
             GQL_ISSUES_LIGHTWEIGHT,
             variables={
-                "owner": GITHUB_REPO_OWNER,
-                "repo": GITHUB_REPO_NAME,
+                "owner": self._owner,
+                "repo": self._repo,
                 "label": label,
                 "limit": limit,
             },
@@ -508,8 +566,8 @@ class GitHubAPI:
         raw = self._graphql(
             GQL_ISSUES_DETAILED,
             variables={
-                "owner": GITHUB_REPO_OWNER,
-                "repo": GITHUB_REPO_NAME,
+                "owner": self._owner,
+                "repo": self._repo,
                 "label": label,
                 "limit": limit,
             },
@@ -525,11 +583,37 @@ class GitHubAPI:
         Raises on failure (caller handles error semantics).
         """
         path = API_ISSUE_COMMENTS.format(
-            owner=GITHUB_REPO_OWNER,
-            repo=GITHUB_REPO_NAME,
+            owner=self._owner,
+            repo=self._repo,
             number=number,
         )
         self._rest_request("POST", path, body={"body": body}, timeout=30)
+
+    def create_issue(self, title: str, body: str, labels: list[str]) -> str:
+        """Create a GitHub issue and return its URL.
+
+        Args:
+            title: Issue title (max 256 chars, will be truncated)
+            body: Issue body (markdown supported)
+            labels: List of label names to apply
+
+        Returns:
+            Issue URL (e.g., https://github.com/owner/repo/issues/123)
+
+        Raises:
+            RuntimeError: If issue creation fails
+        """
+        path = API_ISSUES.format(
+            owner=self._owner,
+            repo=self._repo,
+        )
+        payload = {
+            "title": title[:256],  # Enforce GitHub limit
+            "body": body,
+            "labels": labels,
+        }
+        result = self._rest_request("POST", path, body=payload, timeout=30)
+        return result["html_url"]
 
     # --- PRs (GraphQL) ---
 
@@ -542,8 +626,8 @@ class GitHubAPI:
         raw = self._graphql(
             GQL_OPEN_PRS,
             variables={
-                "owner": GITHUB_REPO_OWNER,
-                "repo": GITHUB_REPO_NAME,
+                "owner": self._owner,
+                "repo": self._repo,
                 "limit": limit,
             },
         )
@@ -555,8 +639,8 @@ class GitHubAPI:
     def list_pr_review_comments(self, pr_number: int) -> list[ReviewComment]:
         """Fetch inline review comments on a pull request."""
         path = API_PR_REVIEW_COMMENTS.format(
-            owner=GITHUB_REPO_OWNER,
-            repo=GITHUB_REPO_NAME,
+            owner=self._owner,
+            repo=self._repo,
             pr_number=pr_number,
         )
         raw_comments = self._rest_request("GET", path)
@@ -567,8 +651,8 @@ class GitHubAPI:
     def list_failed_runs(self, branch: str, limit: int = 1) -> list[WorkflowRun]:
         """List recent failed workflow runs for a branch."""
         path = API_WORKFLOW_RUNS.format(
-            owner=GITHUB_REPO_OWNER,
-            repo=GITHUB_REPO_NAME,
+            owner=self._owner,
+            repo=self._repo,
         )
         params = f"?branch={urllib.parse.quote(branch)}&status=failure&per_page={limit}"
         data = self._rest_request("GET", f"{path}{params}")
@@ -582,8 +666,8 @@ class GitHubAPI:
         the run, finds failed ones, and fetches each job's log text.
         """
         jobs_path = API_RUN_JOBS.format(
-            owner=GITHUB_REPO_OWNER,
-            repo=GITHUB_REPO_NAME,
+            owner=self._owner,
+            repo=self._repo,
             run_id=run_id,
         )
         jobs_data = self._rest_request("GET", jobs_path)
@@ -597,8 +681,8 @@ class GitHubAPI:
         for job in failed_jobs:
             try:
                 log_path = API_JOB_LOGS.format(
-                    owner=GITHUB_REPO_OWNER,
-                    repo=GITHUB_REPO_NAME,
+                    owner=self._owner,
+                    repo=self._repo,
                     job_id=job.id,
                 )
                 log_text = self._rest_request("GET", log_path, timeout=30)

@@ -17,24 +17,25 @@ import time
 import urllib.request
 from pathlib import Path
 
-from penny_team.constants import (
-    API_ACCESS_TOKENS,
-    API_APP,
-    BOT_SUFFIX,
-    ENV_GH_TOKEN,
-    ENV_GIT_AUTHOR_EMAIL,
-    ENV_GIT_AUTHOR_NAME,
-    ENV_GIT_COMMITTER_EMAIL,
-    ENV_GIT_COMMITTER_NAME,
-    GITHUB_API,
-    JWT_ALGORITHM,
-    NOREPLY_DOMAIN,
-)
+# GitHub API constants
+GITHUB_API = "https://api.github.com"
+API_APP = "/app"
+API_ACCESS_TOKENS = "/app/installations/{install_id}/access_tokens"
+JWT_ALGORITHM = "RS256"
+BOT_SUFFIX = "[bot]"
+NOREPLY_DOMAIN = "users.noreply.github.com"
+
+# Environment variable keys
+ENV_GH_TOKEN = "GH_TOKEN"
+ENV_GIT_AUTHOR_NAME = "GIT_AUTHOR_NAME"
+ENV_GIT_AUTHOR_EMAIL = "GIT_AUTHOR_EMAIL"
+ENV_GIT_COMMITTER_NAME = "GIT_COMMITTER_NAME"
+ENV_GIT_COMMITTER_EMAIL = "GIT_COMMITTER_EMAIL"
 
 logger = logging.getLogger(__name__)
 
 
-class GitHubApp:
+class GitHubAuth:
     def __init__(self, app_id: int, private_key_path: Path, installation_id: int):
         self.app_id = app_id
         self.private_key_path = private_key_path
@@ -122,7 +123,7 @@ if __name__ == "__main__":
     if not key_path.is_absolute():
         key_path = project_root / key_path
 
-    app = GitHubApp(
+    app = GitHubAuth(
         app_id=int(os.environ["GITHUB_APP_ID"]),
         private_key_path=key_path,
         installation_id=int(os.environ["GITHUB_APP_INSTALLATION_ID"]),
