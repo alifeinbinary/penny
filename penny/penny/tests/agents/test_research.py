@@ -52,14 +52,13 @@ async def test_research_agent_executes_iterations(
     Test ResearchAgent executes multiple search iterations and posts report.
 
     1. Trigger /research command
-    2. Wait for agent to run iterations
+    2. Drive iterations via direct execute() calls
     3. Verify report is posted when max_iterations is reached
     """
-    # Set low iteration count to keep test fast
     config = make_config(
         research_max_iterations=3,
-        idle_seconds=0.3,
-        scheduler_tick_interval=0.05,
+        research_schedule_interval=9999,
+        scheduler_tick_interval=9999,
     )
 
     mock_ollama.set_response_handler(
@@ -81,8 +80,9 @@ async def test_research_agent_executes_iterations(
         confirmation = await signal_server.wait_for_message(timeout=5.0)
         assert "started research" in confirmation["message"].lower()
 
-        # Wait for research report to be posted
-        await wait_until(lambda: len(signal_server.outgoing_messages) >= 2, timeout=5.0)
+        # Drive iterations directly — 3 iterations + 1 completion call
+        for _ in range(4):
+            await penny.research_agent.execute()
 
         # Last message should be the research report
         report = signal_server.outgoing_messages[-1]
@@ -182,12 +182,11 @@ async def test_research_agent_truncates_long_reports(
     running_penny,
 ):
     """Test ResearchAgent truncates reports exceeding configured max length."""
-    # Set a very low max length to force truncation (300 chars)
     config = make_config(
         research_max_iterations=2,
         research_output_max_length=300,
-        idle_seconds=0.3,
-        scheduler_tick_interval=0.05,
+        research_schedule_interval=9999,
+        scheduler_tick_interval=9999,
     )
 
     # Generate long responses that will definitely exceed 300 chars when formatted
@@ -201,12 +200,13 @@ async def test_research_agent_truncates_long_reports(
         )
     )
 
-    async with running_penny(config):
+    async with running_penny(config) as penny:
         await signal_server.push_message(sender=TEST_SENDER, content="/research ! test topic")
         await signal_server.wait_for_message(timeout=5.0)
 
-        # Wait for report
-        await wait_until(lambda: len(signal_server.outgoing_messages) >= 2, timeout=5.0)
+        # Drive iterations directly — 2 iterations + 1 completion call
+        for _ in range(3):
+            await penny.research_agent.execute()
 
         report = signal_server.outgoing_messages[-1]
         # Report should be truncated to 300 chars max
@@ -228,8 +228,8 @@ async def test_research_agent_stores_iterations(
     """Test ResearchAgent stores each iteration in database for resumability."""
     config = make_config(
         research_max_iterations=2,
-        idle_seconds=0.3,
-        scheduler_tick_interval=0.05,
+        research_schedule_interval=9999,
+        scheduler_tick_interval=9999,
     )
 
     mock_ollama.set_response_handler(
@@ -246,8 +246,9 @@ async def test_research_agent_stores_iterations(
         await signal_server.push_message(sender=TEST_SENDER, content="/research ! coffee beans")
         await signal_server.wait_for_message(timeout=5.0)
 
-        # Wait for completion
-        await wait_until(lambda: len(signal_server.outgoing_messages) >= 2, timeout=5.0)
+        # Drive iterations directly — 2 iterations + 1 completion call
+        for _ in range(3):
+            await penny.research_agent.execute()
 
         # Check iterations in database
         with penny.db.get_session() as session:
@@ -285,8 +286,8 @@ async def test_research_report_logged_to_database(
     """Test research report is logged to MessageLog table."""
     config = make_config(
         research_max_iterations=2,
-        idle_seconds=0.3,
-        scheduler_tick_interval=0.05,
+        research_schedule_interval=9999,
+        scheduler_tick_interval=9999,
     )
 
     mock_ollama.set_response_handler(
@@ -303,8 +304,9 @@ async def test_research_report_logged_to_database(
         await signal_server.push_message(sender=TEST_SENDER, content="/research ! AI")
         await signal_server.wait_for_message(timeout=5.0)
 
-        # Wait for report
-        await wait_until(lambda: len(signal_server.outgoing_messages) >= 2, timeout=5.0)
+        # Drive iterations directly — 2 iterations + 1 completion call
+        for _ in range(3):
+            await penny.research_agent.execute()
 
         # Verify report is in MessageLog
         with penny.db.get_session() as session:
@@ -336,8 +338,8 @@ async def test_research_agent_activates_pending_task(
     """
     config = make_config(
         research_max_iterations=2,
-        idle_seconds=0.3,
-        scheduler_tick_interval=0.05,
+        research_schedule_interval=9999,
+        scheduler_tick_interval=9999,
     )
 
     # Track which task we're on based on request count
@@ -404,15 +406,22 @@ async def test_research_agent_activates_pending_task(
             assert tasks[1].topic == "quantum computing"
             assert tasks[1].status == "pending"
 
-        # Wait for both tasks to reach completed status in the DB
-        def _both_tasks_completed():
-            with penny.db.get_session() as session:
-                tasks = list(
-                    session.exec(select(ResearchTask).order_by(ResearchTask.created_at.asc())).all()  # type: ignore[unresolved-attribute]
-                )
-                return len(tasks) == 2 and all(t.status == "completed" for t in tasks)
+        # Drive task 1: 2 iterations + 1 completion (which auto-activates task 2)
+        for _ in range(3):
+            await penny.research_agent.execute()
 
-        await wait_until(_both_tasks_completed, timeout=10.0)
+        # Verify task 1 completed and task 2 activated
+        with penny.db.get_session() as session:
+            tasks = list(
+                session.exec(select(ResearchTask).order_by(ResearchTask.created_at.asc())).all()  # type: ignore[unresolved-attribute]
+            )
+            assert tasks[0].status == "completed"
+            assert tasks[0].completed_at is not None
+            assert tasks[1].status == "in_progress"
+
+        # Drive task 2: 2 iterations + 1 completion
+        for _ in range(3):
+            await penny.research_agent.execute()
 
         # Verify both tasks completed with timestamps
         with penny.db.get_session() as session:
@@ -421,6 +430,7 @@ async def test_research_agent_activates_pending_task(
             )
             assert tasks[0].completed_at is not None
             assert tasks[1].completed_at is not None
+            assert tasks[1].status == "completed"
 
         # Verify both reports were posted
         messages = signal_server.outgoing_messages
@@ -547,8 +557,8 @@ async def test_research_focus_reply_starts_research(
     """
     config = make_config(
         research_max_iterations=2,
-        idle_seconds=0.3,
-        scheduler_tick_interval=0.05,
+        research_schedule_interval=9999,
+        scheduler_tick_interval=9999,
     )
 
     responses = [
@@ -613,8 +623,9 @@ async def test_research_focus_reply_starts_research(
             assert tasks[0].status == "in_progress"
             assert tasks[0].focus == "comprehensive list with dates and locations"
 
-        # Step 3: Wait for research report
-        await wait_until(lambda: len(signal_server.outgoing_messages) >= 3, timeout=5.0)
+        # Step 3: Drive iterations directly — 2 iterations + 1 completion call
+        for _ in range(3):
+            await penny.research_agent.execute()
 
         report = signal_server.outgoing_messages[-1]
         assert "research report complete" in report["message"].lower()
@@ -634,8 +645,8 @@ async def test_research_focus_reply_go_starts_without_focus(
     """
     config = make_config(
         research_max_iterations=2,
-        idle_seconds=0.3,
-        scheduler_tick_interval=0.05,
+        research_schedule_interval=9999,
+        scheduler_tick_interval=9999,
     )
 
     mock_ollama.set_response_handler(
@@ -665,8 +676,10 @@ async def test_research_focus_reply_go_starts_without_focus(
             assert tasks[0].status == "in_progress"
             assert tasks[0].focus is None
 
-        # Wait for report
-        await wait_until(lambda: len(signal_server.outgoing_messages) >= 3, timeout=5.0)
+        # Drive iterations directly — 2 iterations + 1 completion call
+        for _ in range(3):
+            await penny.research_agent.execute()
+
         report = signal_server.outgoing_messages[-1]
         assert "research report complete" in report["message"].lower()
 
@@ -685,8 +698,8 @@ async def test_research_focus_timeout_auto_starts(
     """
     config = make_config(
         research_max_iterations=2,
-        idle_seconds=0.3,
-        scheduler_tick_interval=0.05,
+        research_schedule_interval=9999,
+        scheduler_tick_interval=9999,
     )
 
     mock_ollama.set_response_handler(
@@ -716,8 +729,10 @@ async def test_research_focus_timeout_auto_starts(
             session.add(task)
             session.commit()
 
-        # Wait for the research agent to auto-start the task and complete it
-        await wait_until(lambda: len(signal_server.outgoing_messages) >= 1, timeout=5.0)
+        # First execute() triggers focus timeout check (auto-starts task) + runs iteration 1
+        # Then iteration 2, then completion
+        for _ in range(3):
+            await penny.research_agent.execute()
 
         report = signal_server.outgoing_messages[-1]
         assert "research report complete" in report["message"].lower()
