@@ -11,6 +11,7 @@ from penny.agents import (
     Agent,
     ChatAgent,
     HistoryAgent,
+    NotifyAgent,
     ThinkingAgent,
 )
 from penny.channels import MessageChannel, create_channel
@@ -170,6 +171,18 @@ class Penny:
             vision_model_client=self.vision_model_client,
             embedding_model_client=self.embedding_model_client,
         )
+        self.notify_agent = NotifyAgent(
+            search_tool=self._shared_search_tool,
+            news_tool=self._news_tool,
+            system_prompt=Prompt.CONVERSATION_PROMPT,
+            model_client=self.model_client,
+            tools=[],
+            db=self.db,
+            config=config,
+            max_steps=int(config.runtime.MESSAGE_MAX_STEPS),
+            tool_timeout=config.tool_timeout,
+            embedding_model_client=self.embedding_model_client,
+        )
         self._init_background_agents(config)
 
     def _background_agent_kwargs(self, config: Config) -> dict:
@@ -245,7 +258,7 @@ class Penny:
         )
 
     def _init_channel(self, config: Config, channel: MessageChannel | None) -> None:
-        """Create channel and connect agents that send proactive messages."""
+        """Create channel and connect agents that send notifications."""
         self.channel = channel or create_channel(
             config=config,
             message_agent=self.chat_agent,
@@ -253,7 +266,7 @@ class Penny:
             command_registry=self.command_registry,
         )
         self.schedule_executor.set_channel(self.channel)
-        self.chat_agent.set_channel(self.channel)
+        self.notify_agent.set_channel(self.channel)
 
     def _init_scheduler(self, config: Config) -> None:
         """Create background scheduler with prioritized schedules."""
@@ -264,8 +277,8 @@ class Penny:
                 interval=config.runtime.HISTORY_INTERVAL,
             ),
             PeriodicSchedule(
-                agent=self.chat_agent,
-                interval=config.runtime.PROACTIVE_CHECK_INTERVAL,
+                agent=self.notify_agent,
+                interval=config.runtime.NOTIFY_CHECK_INTERVAL,
             ),
             PeriodicSchedule(
                 agent=self.thinking_agent,
