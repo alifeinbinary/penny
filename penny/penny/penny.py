@@ -255,14 +255,10 @@ class Penny:
             zoho_credentials=zoho_credentials,
         )
 
-    def _get_zoho_credentials(self, config: Config) -> ZohoCredentials | None:
-        """Get Zoho credentials if all required values are configured."""
+    def _get_zoho_credentials(self, config: Config) -> tuple[str, str, str] | None:
+        """Get Zoho credentials tuple if all required values are configured."""
         if config.zoho_api_id and config.zoho_api_secret and config.zoho_refresh_token:
-            return ZohoCredentials(
-                client_id=config.zoho_api_id,
-                client_secret=config.zoho_api_secret,
-                refresh_token=config.zoho_refresh_token,
-            )
+            return (config.zoho_api_id, config.zoho_api_secret, config.zoho_refresh_token)
         return None
 
     def _init_channel(self, config: Config, channel: MessageChannel | None) -> None:
