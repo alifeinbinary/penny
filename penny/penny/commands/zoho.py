@@ -65,12 +65,12 @@ class ZohoCommand(Command):
                 SearchEmailsTool(zoho_client),
                 ListEmailsTool(zoho_client),
                 ListFoldersTool(zoho_client),
-                ReadEmailsTool(zoho_client),
+                ReadEmailsTool(zoho_client, context.model_client, prompt),
                 DraftEmailTool(zoho_client),
             ]
 
             agent = Agent(
-                system_prompt=Prompt.EMAIL_SYSTEM_PROMPT,
+                system_prompt=Prompt.ZOHO_SYSTEM_PROMPT,
                 model_client=context.model_client,
                 tools=tools,
                 db=context.db,
