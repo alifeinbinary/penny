@@ -6,8 +6,6 @@ import logging
 from typing import Any
 
 from penny.email.protocol import EmailClient
-from penny.ollama.client import OllamaClient
-from penny.prompts import Prompt
 from penny.tools.base import Tool
 
 logger = logging.getLogger(__name__)
@@ -35,18 +33,11 @@ class ReadEmailsTool(Tool):
         "required": ["email_ids"],
     }
 
-    def __init__(
-        self,
-        email_client: EmailClient,
-        ollama_client: OllamaClient,
-        user_query: str,
-    ) -> None:
+    def __init__(self, email_client: EmailClient) -> None:
         self._client = email_client
-        self._ollama = ollama_client
-        self._user_query = user_query
 
     async def execute(self, **kwargs: Any) -> str:
-        """Read emails and summarize relevant content."""
+        """Read emails and return their content."""
         email_ids = kwargs["email_ids"]
         if not email_ids:
             return NO_EMAILS_TO_READ
@@ -54,10 +45,4 @@ class ReadEmailsTool(Tool):
         if not emails:
             return NO_EMAILS_TO_READ
 
-        raw_content = "\n\n---\n\n".join(str(e) for e in emails)
-        prompt = Prompt.EMAIL_SUMMARIZE_PROMPT.format(
-            query=self._user_query,
-            emails=raw_content,
-        )
-        response = await self._ollama.chat([{"role": "user", "content": prompt}])
-        return response.content or raw_content
+        return "\n\n---\n\n".join(str(e) for e in emails)

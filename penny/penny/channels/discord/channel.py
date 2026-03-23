@@ -72,6 +72,8 @@ class DiscordChannel(MessageChannel):
         self._setup_events()
 
         logger.info("Initialized Discord channel for channel_id=%s", channel_id)
+        logger.info("[DIAG] Discord intents configured: message_content=%s, messages=%s, guilds=%s",
+                    intents.message_content, intents.messages, intents.guilds)
 
     @property
     def sender_id(self) -> str:
@@ -86,6 +88,25 @@ class DiscordChannel(MessageChannel):
             await self._on_ready()
 
         @self.client.event
+        async def on_connect() -> None:
+            logger.info("[DIAG] Discord gateway CONNECTED")
+
+        @self.client.event
+        async def on_disconnect() -> None:
+            logger.warning("[DIAG] Discord gateway DISCONNECTED")
+
+        @self.client.event
+        async def on_resumed() -> None:
+            logger.info("[DIAG] Discord gateway session RESUMED")
+
+        @self.client.event
+        async def on_socket_raw_receive(msg: str) -> None:
+            # Log first 200 chars of raw gateway messages for debugging
+            # This fires for EVERY gateway event including heartbeats
+            if '"t":"MESSAGE_CREATE"' in msg or '"t": "MESSAGE_CREATE"' in msg:
+                logger.info("[DIAG] Raw MESSAGE_CREATE received: %s", msg[:500])
+
+        @self.client.event
         async def on_message(message: discord.Message) -> None:
             await self._on_message(message)
 
@@ -96,6 +117,8 @@ class DiscordChannel(MessageChannel):
     async def _on_ready(self) -> None:
         """Handle the bot ready event — resolve target channel."""
         logger.info("Discord bot logged in as %s", self.client.user)
+        logger.info("[DIAG] Bot user ID: %s", self.client.user.id if self.client.user else "None")
+        logger.info("[DIAG] Gateway latency: %.2fms", self.client.latency * 1000)
         self._log_guilds()
 
         channel = self.client.get_channel(int(self.channel_id))
@@ -121,13 +144,29 @@ class DiscordChannel(MessageChannel):
 
     async def _on_message(self, message: discord.Message) -> None:
         """Handle an incoming Discord message."""
+        # Log ALL messages for debugging (before any filtering)
+        logger.info(
+            "[DIAG] on_message fired: author=%s (id=%s, bot=%s), channel=%s, content='%s'",
+            message.author.name,
+            message.author.id,
+            message.author.bot,
+            message.channel.id,
+            message.content[:100] if message.content else "<empty>",
+        )
+
         if message.author == self.client.user:
+            logger.debug("[DIAG] Ignoring own message")
             return
         if str(message.channel.id) != self.channel_id:
+            logger.debug(
+                "[DIAG] Ignoring message from wrong channel: got %s, expected %s",
+                message.channel.id,
+                self.channel_id,
+            )
             return
 
-        logger.debug(
-            "Received Discord message from %s: %s",
+        logger.info(
+            "[DIAG] Message PASSED filters, processing: from %s: '%s'",
             message.author.name,
             message.content[:100],
         )
@@ -179,16 +218,37 @@ class DiscordChannel(MessageChannel):
 
     async def listen(self) -> None:
         """Start listening for messages via Discord gateway."""
-        logger.info("Starting Discord client...")
-        asyncio.create_task(self.client.start(self._token))
+        # If validate_connectivity was called, client is already running
+        if not self._ready.is_set():
+            logger.info("Starting Discord client...")
+            logger.info("[DIAG] Token length: %d chars (first 10: %s...)",
+                        len(self._token),
+                        self._token[:10] if len(self._token) > 10 else self._token)
+            asyncio.create_task(self._start_client_with_error_handling())
 
-        # Wait for the client to be ready
-        await self._ready.wait()
+            # Wait for the client to be ready
+            logger.info("[DIAG] Waiting for Discord client to be ready...")
+            await self._ready.wait()
+        else:
+            logger.info("[DIAG] Discord client already connected, skipping startup")
+
         logger.info("Discord client is ready, channel_id=%s", self.channel_id)
+        logger.info("[DIAG] Target channel resolved: %s",
+                    self._channel.name if self._channel else "NONE")
 
         # Keep running until shutdown
         while self._running:
             await asyncio.sleep(1)
+            # heartbeat_counter += 1
+            # if heartbeat_counter >= heartbeat_interval:
+            #     heartbeat_counter = 0
+            #     logger.info(
+            #         "[DIAG] Heartbeat: connected=%s, latency=%.2fms, guilds=%d, channel=%s",
+            #         not self.client.is_closed(),
+            #         self.client.latency * 1000 if self.client.latency else -1,
+            #         len(self.client.guilds),
+            #         self._channel.name if self._channel else "NONE",
+            #     )
 
     async def send_message(
         self,
@@ -274,6 +334,48 @@ class DiscordChannel(MessageChannel):
         except Exception as e:
             logger.warning("Unexpected error sending typing indicator: %s", e)
             return False
+
+    async def validate_connectivity(self) -> None:
+        """
+        Start the Discord client and wait for it to be ready.
+
+        This must be called before sending any messages (e.g., startup announcements).
+        The client.start() is run as a background task, and we wait for on_ready to fire.
+
+        Raises:
+            ConnectionError: If the client fails to connect within timeout
+        """
+        if self._ready.is_set():
+            logger.debug("[DIAG] Discord client already connected")
+            return
+
+        logger.info("[DIAG] Starting Discord client for connectivity validation...")
+        logger.info("[DIAG] Token length: %d chars (first 10: %s...)",
+                    len(self._token), self._token[:10] if len(self._token) > 10 else self._token)
+
+        # Start the client in the background
+        asyncio.create_task(self._start_client_with_error_handling())
+
+        # Wait for ready with timeout
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=30.0)
+            logger.info("[DIAG] Discord client connected and ready")
+        except TimeoutError as e:
+            raise ConnectionError(
+                "Discord client failed to connect within 30 seconds. "
+                "Check your DISCORD_BOT_TOKEN and network connectivity."
+            ) from e
+
+    async def _start_client_with_error_handling(self) -> None:
+        """Start the Discord client with error logging."""
+        try:
+            await self.client.start(self._token)
+        except discord.LoginFailure as e:
+            logger.error("[DIAG] Discord login failed: %s", e)
+            raise
+        except Exception as e:
+            logger.error("[DIAG] Discord client error: %s", e)
+            raise
 
     def get_connection_url(self) -> str:
         """

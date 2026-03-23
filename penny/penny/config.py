@@ -173,7 +173,7 @@ class Config:
 
     # Fastmail JMAP configuration (optional, enables /email command)
     fastmail_api_token: str | None = None
-    email_max_steps: int = 5
+    email_max_steps: int = 8
 
     # News API configuration (optional, enables news search tool for agents)
     news_api_key: str | None = None

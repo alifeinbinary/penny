@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html.parser
 import logging
 import time
@@ -288,7 +289,16 @@ class ZohoClient:
         emails_data = data.get("data", [])
         logger.info("Zoho search returned %d email(s)", len(emails_data))
 
-        return [self._parse_email_summary(e) for e in emails_data]
+        # Log raw response keys for debugging
+        if emails_data:
+            logger.info("[DIAG] First email raw keys: %s", list(emails_data[0].keys()))
+
+        summaries = [self._parse_email_summary(e) for e in emails_data]
+
+        # Log the IDs we're returning
+        logger.info("[DIAG] Returning email IDs: %s", [s.id for s in summaries])
+
+        return summaries
 
     def _parse_email_summary(self, e: dict[str, Any]) -> EmailSummary:
         """Parse a Zoho email response into an EmailSummary."""
@@ -310,8 +320,18 @@ class ZohoClient:
         if uri:
             return uri
         # Fallback to folder:message format
-        folder_id = e.get("folderId", "")
+        # Zoho search API may return "folderId" or "mailFolderId"
+        folder_id = e.get("folderId") or e.get("mailFolderId") or ""
         message_id = e.get("messageId", "")
+
+        if not folder_id:
+            # Log available keys to help debug field name issues
+            logger.warning(
+                "Missing folderId in email data. Available keys: %s, messageId: %s",
+                list(e.keys()),
+                message_id,
+            )
+
         return f"{folder_id}:{message_id}"
 
     def _parse_email_id(self, email_id: str) -> tuple[str | None, str]:
@@ -336,7 +356,7 @@ class ZohoClient:
 
             dt = datetime.fromtimestamp(ts_int / 1000, tz=UTC)
             return dt.isoformat()
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return str(ts)
 
     @staticmethod
@@ -353,16 +373,25 @@ class ZohoClient:
         if not email_ids:
             return []
 
-        headers = await self._get_headers()
-        results: list[EmailDetail] = []
+        start = time.monotonic()
+        logger.info("[DIAG] read_emails starting for %d email(s)", len(email_ids))
 
-        for email_id in email_ids:
+        headers = await self._get_headers()
+
+        # Fetch emails concurrently to reduce total time
+        async def fetch_one(email_id: str) -> EmailDetail | None:
             try:
-                detail = await self._fetch_email_detail(email_id, headers)
-                if detail:
-                    results.append(detail)
+                return await self._fetch_email_detail(email_id, headers)
             except Exception as e:
                 logger.warning("Failed to fetch email %s: %s", email_id, e)
+                return None
+
+        results_raw = await asyncio.gather(*[fetch_one(eid) for eid in email_ids])
+        results = [r for r in results_raw if r is not None]
+
+        elapsed = time.monotonic() - start
+        logger.info("[DIAG] read_emails fetched %d/%d emails in %.2fs",
+                    len(results), len(email_ids), elapsed)
 
         return results
 
