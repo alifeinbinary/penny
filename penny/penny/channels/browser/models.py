@@ -225,7 +225,8 @@ class MemoryRecord(BaseModel):
     name: str
     type: str  # "collection" | "log"
     description: str
-    recall: str  # "off" | "recent" | "relevant" | "all"
+    inclusion: str  # "always" | "relevant" | "never" — stage-1 routing
+    recall: str  # "all" | "relevant" | "recent" — stage-2 entry rendering
     archived: bool
     extraction_prompt: str | None
     collector_interval_seconds: int | None
@@ -277,7 +278,8 @@ class BrowserMemoryCreate(BaseModel):
     type: str
     name: str
     description: str
-    recall: str  # "off" | "recent" | "relevant" | "all"
+    inclusion: str | None = None  # "always" | "relevant" | "never" (default relevant)
+    recall: str  # "all" | "relevant" | "recent" (legacy "off" → inclusion=never)
     extraction_prompt: str | None = None
     collector_interval_seconds: int | None = None
 
@@ -289,7 +291,8 @@ class BrowserMemoryUpdate(BaseModel):
     type: str
     name: str
     description: str | None = None
-    recall: str | None = None
+    inclusion: str | None = None  # "always" | "relevant" | "never"
+    recall: str | None = None  # "all" | "relevant" | "recent"
     extraction_prompt: str | None = None
     collector_interval_seconds: int | None = None
 
