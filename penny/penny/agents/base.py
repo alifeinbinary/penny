@@ -25,7 +25,6 @@ from penny.responses import PennyResponse
 from penny.tools import Tool, ToolCall, ToolExecutor, ToolRegistry
 from penny.tools.browse import BrowseTool
 from penny.tools.memory_tools import DoneTool, LogReadTool, build_memory_tools
-from penny.tools.models import SearchResult
 from penny.tools.send_message import SendMessageTool
 
 if TYPE_CHECKING:
@@ -112,19 +111,6 @@ def _strip_think_tags(content: str) -> tuple[str, str | None]:
     return cleaned, extracted
 
 
-# Prefixes in tool result strings that indicate a failed or empty result.
-# Checked after tool execution to mark ToolCallRecord.failed = True.  A
-# ``Refused:`` shape/read-only refusal (the memory tools' wrong-shape message) is
-# a failed call too — the model asked for something the tool won't do.
-_TOOL_FAILURE_PREFIXES = (
-    "Error: ",
-    "Refused: ",
-    PennyResponse.NO_RESULTS_TEXT,
-    "Failed to search:",
-    "No browser connected",
-)
-
-
 def _parse_text_form_done(content: str) -> dict | None:
     """Recover an intended ``done(...)`` call from text content.
 
@@ -152,11 +138,6 @@ def _parse_text_form_done(content: str) -> dict | None:
     if "success" not in args and "summary" not in args:
         return None
     return args
-
-
-def _is_tool_result_failed(result_str: str) -> bool:
-    """Return True if a tool result indicates failure (error, no results, quota exceeded)."""
-    return any(result_str.startswith(prefix) for prefix in _TOOL_FAILURE_PREFIXES)
 
 
 def _build_strong_nudge(messages: list[dict]) -> str:
@@ -927,42 +908,28 @@ class Agent:
 
         record = ToolCallRecord(tool=tool_name, arguments=arguments, reasoning=reasoning)
         tool_call = ToolCall(tool=tool_name, arguments=arguments)
-        tool_result = await self._tool_executor.execute(tool_call)
 
-        if tool_result.error:
-            result_str = f"Error: {tool_result.error}"
-            record.failed = True
-            record.result = result_str
-            logger.debug("Tool result (failed): %s", result_str[:200])
-            return result_str, record, []
-
-        if isinstance(tool_result.result, SearchResult):
-            result_str, urls = self._format_search_result(tool_result.result)
-            record.failed = _is_tool_result_failed(result_str)
-            record.result = result_str
-            logger.debug("Tool result: %s", result_str[:200])
-            return result_str, record, urls
-        result_str = str(tool_result.result)
-        record.failed = _is_tool_result_failed(result_str)
-        record.result = result_str
-        logger.debug("Tool result: %s", result_str[:200])
-        return result_str, record, []
+        # The executor always hands back a structured ToolResult — a tool's own
+        # return, or a synthesised failed one for framework errors (not-found,
+        # timeout, crash).  One branch, no string-prefix guessing; success and
+        # mutated are authoritative.
+        result = await self._tool_executor.execute(tool_call)
+        record.failed = not result.success
+        record.mutated = result.mutated
+        record.result = result.message
+        logger.debug(
+            "Tool result (success=%s mutated=%s): %s",
+            result.success,
+            result.mutated,
+            result.message[:200],
+        )
+        return result.message, record, result.source_urls
 
     @staticmethod
     def _make_call_key(tool_name: str, arguments: dict) -> tuple[str, ...]:
         """Build a hashable key from tool name + arguments for dedup."""
         arg_parts = tuple(f"{k}={v}" for k, v in sorted(arguments.items()))
         return (tool_name, *arg_parts)
-
-    @staticmethod
-    def _format_search_result(result: SearchResult) -> tuple[str, list[str]]:
-        """Format a SearchResult. Returns (text, urls)."""
-        text = result.text
-        urls = result.urls or []
-        if urls:
-            sources = "\n".join(urls)
-            text += f"\n\nSources:\n{sources}"
-        return text, urls
 
     # ── URL validation ──────────────────────────────────────────────────
 

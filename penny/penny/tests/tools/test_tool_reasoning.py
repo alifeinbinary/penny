@@ -3,6 +3,7 @@
 from typing import Any
 
 from penny.tools.base import Tool
+from penny.tools.models import ToolResult
 
 
 class _DummyTool(Tool):
@@ -18,8 +19,8 @@ class _DummyTool(Tool):
         "required": ["query"],
     }
 
-    async def execute(self, **kwargs: Any) -> str:
-        return "ok"
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        return ToolResult(message="ok")
 
 
 class TestToolReasoningSchema:

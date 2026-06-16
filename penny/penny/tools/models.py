@@ -5,15 +5,36 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-class SearchResult(BaseModel):
-    """Result from a search tool — text the model reads plus source URLs.
+class ToolResult(BaseModel):
+    """The single structured result of running a tool.
 
-    Images are no longer carried here: the browse tool stores them in the media
-    table at capture time and they are matched back in side-channel at egress.
+    One uniform contract — what a tool returns from ``execute`` AND what the
+    ``ToolExecutor`` hands back (it synthesises a failed result for framework
+    errors a tool can't report itself: tool-not-found, bad arguments, timeout,
+    uncaught exception).  No separate envelope, no bare strings, no ``str | T``.
+
+    - ``message``: the model-facing body, rendered into the tool result the LLM reads.
+    - ``success``: ``False`` for errors, refusals, or empty/no-result outcomes —
+      becomes ``ToolCallRecord.failed``.
+    - ``mutated``: the call changed durable state or had an outbound side effect
+      (a row written, an entry moved/deleted, a message sent).  ``False`` for reads
+      and *successful no-ops* (a duplicate-rejected write, an update/delete/move on a
+      missing key) — this is the signal the collector's work/no-work split and
+      auto-throttle ride on.
+    - ``source_urls``: URLs the final reply should cite (browse) — threaded into the
+      response's source-appending.
+
+    Images are not carried here: the browse tool stores them in the media table at
+    capture time and they are matched back side-channel at egress.
     """
 
-    text: str
-    urls: list[str] = Field(default_factory=list)
+    message: str
+    success: bool = True
+    mutated: bool = False
+    source_urls: list[str] = Field(default_factory=list)
+
+    def __str__(self) -> str:
+        return self.message
 
 
 class BrowsePage(BaseModel):
@@ -78,15 +99,6 @@ class ToolCall(BaseModel):
 
     tool: str
     arguments: dict[str, Any] = Field(default_factory=dict)
-    id: str | None = None
-
-
-class ToolResult(BaseModel):
-    """Result from executing a tool."""
-
-    tool: str
-    result: Any
-    error: str | None = None
     id: str | None = None
 
 
