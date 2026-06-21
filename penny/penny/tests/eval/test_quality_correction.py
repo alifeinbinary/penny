@@ -35,7 +35,8 @@ import pytest
 from penny.constants import PennyConstants, RunOutcome
 from penny.database import Database
 from penny.database.memory import Inclusion, RecallMode
-from penny.tests.eval.conftest import CollectorScorer, tool_was_called
+from penny.tests.eval.conftest import CollectorScorer, looks_numbered, tool_was_called
+from penny.tests.eval.fixtures import WATCHLIST, WATCHLIST_INTENT, WATCHLIST_PROSE_PROMPT
 
 pytestmark = pytest.mark.eval
 
@@ -163,14 +164,33 @@ def _score_update(suspect: str, forbidden: str | None) -> CollectorScorer:
         memory = db.memories.get(suspect)
         new_prompt = (memory.extraction_prompt or "") if memory else ""
         fails = []
-        if not tool_was_called(db, "prompt_test"):
-            fails.append("did not dry-run the fix with prompt_test before applying")
         if new_prompt == original:
             fails.append(f"did not change {suspect!r}'s extraction_prompt")
         elif forbidden is not None and forbidden in new_prompt:
             fails.append(f"corrected prompt still contains the offending {forbidden!r} step")
         elif len(new_prompt) < 80:
             fails.append(f"corrected prompt looks gutted ({len(new_prompt)} chars)")
+        if not sent:
+            fails.append("did not message the user about the change")
+        return fails
+
+    return _score
+
+
+def _score_rewrote_numbered(suspect: str) -> CollectorScorer:
+    """Format enforcement: a prose extraction_prompt must be rewritten as a NUMBERED
+    instruction/tool-call list (apply + notify) — numbered recipes are followed far
+    more reliably than prose, so the correction must not stay prose."""
+
+    def _score(db: Database, before: object, sent: list[str]) -> list[str]:
+        original = cast(str, before)
+        memory = db.memories.get(suspect)
+        new_prompt = (memory.extraction_prompt or "") if memory else ""
+        fails = []
+        if new_prompt == original:
+            fails.append(f"did not rewrite {suspect!r}'s prose extraction_prompt")
+        elif not looks_numbered(new_prompt):
+            fails.append("rewrote the prompt but the result is still not a numbered list")
         if not sent:
             fails.append("did not message the user about the change")
         return fails
@@ -670,6 +690,134 @@ async def test_triage_converges(collector_eval) -> None:
         ),
         snapshot=_snapshot_many(drifted + healthy),
         score=_score_triage(drifted=drifted, healthy=healthy),
+        min_pass_rate=None,
+    )
+
+
+async def test_rewrites_prose_to_numbered(collector_eval) -> None:
+    """When quality rewrites a drifted collection whose prompt is PROSE, the fix must
+    come out as a NUMBERED instruction/tool-call recipe — gpt-oss follows numbered
+    lists far more reliably (a prose collector task bails ~60% on the empty user turn;
+    the numbered rewrite ~5%).  This uses a CLEAR drift (intent says stay quiet, the
+    run sent a ping) so the rewrite is reliably triggered — what we score is that the
+    corrected prompt is numbered, not prose.  Quality is NOT asked to hunt for prose
+    on its own (that over-corrects healthy collections); it only reformats the prompt
+    it is already rewriting to fix a behaviour drift."""
+    suspect = "espresso-gear"
+    prose_prompt = (
+        "Collect espresso equipment worth considering by browsing the web for new "
+        "espresso gear and reading the actual pages, then writing what you find into "
+        "the espresso-gear collection.  Whenever a write succeeds, send the user a "
+        "one-sentence note about the new item with its URL, and finish by calling done."
+    )
+    await collector_eval(
+        case_id="quality-rewrites-prose-to-numbered",
+        collection=PennyConstants.MEMORY_QUALITY_COLLECTION,
+        seed=_seed(
+            suspect=suspect,
+            description="A quiet running list of espresso equipment worth considering.",
+            intent="Keep a quiet running list of espresso equipment worth considering "
+            "— never ping me about it, I'll check the list myself.",
+            prompt=prose_prompt,
+            runs=[
+                {
+                    "run_id": "espresso-prose-1",
+                    "outcome": RunOutcome.WORKED,
+                    "summary": "wrote 1 entry and sent an update about a new grinder",
+                    "calls": [
+                        (
+                            "collection_write",
+                            {
+                                "memory": suspect,
+                                "entries": [
+                                    {
+                                        "key": "niche-zero-clone",
+                                        "content": "Niche Zero clone grinder, $300",
+                                    }
+                                ],
+                            },
+                        ),
+                        (
+                            "send_message",
+                            {"content": "Found a new espresso grinder: the Niche clone, $300."},
+                        ),
+                        (
+                            "done",
+                            {"success": True, "summary": "wrote 1 entry and sent an update"},
+                        ),
+                    ],
+                }
+            ],
+        ),
+        snapshot=_snapshot(suspect),
+        score=_score_rewrote_numbered(suspect),
+        min_pass_rate=None,
+    )
+
+
+async def test_repairs_done_only_bailout(collector_eval) -> None:
+    """Tier-0 compliance: a collector that jumped straight to done() WITHOUT calling
+    any read/work tool isn't following its own instructions — quality must catch that
+    and repair the prompt (a numbered recipe that actually reads) before any
+    intent-drift reasoning.  Modeled on real done-only no_work runs — the prose
+    collectors bail exactly this way (91 such runs in prod, mostly one prose collector).
+
+    Baseline is RED today: a no_work run renders header-only, so quality is shown a
+    clean-looking quiet cycle and does nothing.  Goes green once the facade surfaces
+    the tool trace (incl. done) AND the prompt gains the tier-0 check."""
+    suspect = WATCHLIST.name
+    await collector_eval(
+        case_id="quality-repairs-done-only",
+        collection=PennyConstants.MEMORY_QUALITY_COLLECTION,
+        seed=_seed(
+            suspect=suspect,
+            description=WATCHLIST.description,
+            intent=WATCHLIST_INTENT,
+            prompt=WATCHLIST_PROSE_PROMPT,
+            runs=[
+                {
+                    "run_id": "watchlist-bail-done",
+                    "outcome": RunOutcome.NO_WORK,
+                    "summary": "no new matches this cycle",
+                    "calls": [
+                        ("done", {"success": True, "summary": "no new matches this cycle"}),
+                    ],
+                }
+            ],
+        ),
+        snapshot=_snapshot(suspect),
+        score=_score_rewrote_numbered(suspect),
+        min_pass_rate=None,
+    )
+
+
+async def test_repairs_zero_tool_bailout(collector_eval) -> None:
+    """Tier-0 compliance, the other shape: a run that called NO tools at all (exited
+    immediately, no done()) — it never did any work.  Modeled on real zero-tool failed
+    runs (37 in prod).  Quality must repair the prompt so the collector actually reads
+    before concluding there's nothing to do.
+
+    Baseline RED for the same reason (failed runs render header-only and are skipped)."""
+    suspect = WATCHLIST.name
+    await collector_eval(
+        case_id="quality-repairs-zero-tool",
+        collection=PennyConstants.MEMORY_QUALITY_COLLECTION,
+        seed=_seed(
+            suspect=suspect,
+            description=WATCHLIST.description,
+            intent=WATCHLIST_INTENT,
+            prompt=WATCHLIST_PROSE_PROMPT,
+            runs=[
+                {
+                    "run_id": "watchlist-bail-zero",
+                    "outcome": RunOutcome.FAILED,
+                    "summary": "exited without calling any tool",
+                    "calls": [],
+                }
+            ],
+        ),
+        snapshot=_snapshot(suspect),
+        score=_score_rewrote_numbered(suspect),
         min_pass_rate=None,
     )
 
