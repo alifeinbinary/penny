@@ -13,7 +13,6 @@ from penny.commands.undislike import UndislikeCommand
 from penny.commands.unlike import UnlikeCommand
 
 if TYPE_CHECKING:
-    from penny.llm.image_client import OllamaImageClient
     from penny.zoho.models import ZohoCredentials
 
 __all__ = [
@@ -27,7 +26,6 @@ __all__ = [
 
 
 def create_command_registry(
-    image_model_client: OllamaImageClient | None = None,
     fastmail_api_token: str | None = None,
     zoho_credentials: ZohoCredentials | None = None,
 ) -> CommandRegistry:
@@ -35,7 +33,6 @@ def create_command_registry(
     Factory to create registry with builtin commands.
 
     Args:
-        image_model_client: Optional image generation OllamaImageClient (required for draw command)
         fastmail_api_token: Optional Fastmail API token (required for email command)
         zoho_credentials: Optional ZohoCredentials for Zoho Mail API (required for zoho command)
 
@@ -55,12 +52,6 @@ def create_command_registry(
     registry.register(UnlikeCommand())
     registry.register(DislikeCommand())
     registry.register(UndislikeCommand())
-
-    # Register draw command if image model client is configured
-    if image_model_client:
-        from penny.commands.draw import DrawCommand
-
-        registry.register(DrawCommand())
 
     # Register email command if Fastmail API token is configured
     if fastmail_api_token:
