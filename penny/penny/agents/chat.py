@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from penny.agents.base import Agent
+from penny.agents.base import Agent, ProgressCallback
 from penny.agents.models import ControllerResponse
 from penny.agents.self_state import SelfStateHeader
 from penny.channels.base import PageContext
@@ -144,6 +144,7 @@ class ChatAgent(Agent):
         quoted_text: str | None = None,
         run_id: str | None = None,
         on_tool_start: Callable[[list[tuple[str, dict]]], Awaitable[None]] | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> ControllerResponse:
         """Handle an incoming message — summary method.
 
@@ -176,6 +177,8 @@ class ChatAgent(Agent):
                     max_steps=PennyConstants.VISION_MAX_STEPS,
                     system_prompt=system_prompt,
                     run_id=run_id,
+                    on_progress=on_progress,
+                    progress_scope="foreground",
                     prompt_type=ChatPromptType.VISION_MESSAGE,
                 )
 
@@ -189,6 +192,8 @@ class ChatAgent(Agent):
                 system_prompt=system_prompt,
                 run_id=run_id,
                 on_tool_start=on_tool_start,
+                on_progress=on_progress,
+                progress_scope="foreground",
                 prompt_type=ChatPromptType.USER_MESSAGE,
             )
         finally:

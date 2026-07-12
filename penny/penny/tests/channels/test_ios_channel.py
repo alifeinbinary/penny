@@ -10,8 +10,14 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from penny.agents.base import AgentProgressEvent
 from penny.channels.ios.apns import ApnsClient, ApnsConfig, ApnsEnvironment, ApnsError
-from penny.channels.ios.channel import PUSH_GREETING_TITLE, TEST_PUSH_MESSAGE, IosChannel
+from penny.channels.ios.channel import (
+    PUSH_GREETING_TITLE,
+    TEST_PUSH_MESSAGE,
+    IosChannel,
+    IosConnectionInfo,
+)
 from penny.channels.ios.models import (
     IOS_MSG_TYPE_ACK,
     IOS_MSG_TYPE_EMBEDDING_REQUEST,
@@ -159,6 +165,50 @@ async def test_listen_returns_after_close(tmp_path):
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_progress_is_redacted_and_connection_scoped(tmp_path):
+    db = _make_db(tmp_path)
+    channel = _make_channel(db)
+    foreground = FakeWs()
+    other = FakeWs()
+    channel._connections["device-a"] = IosConnectionInfo(
+        ws=cast(Any, foreground), device_id=1, identifier="device-a"
+    )
+    channel._connections["device-b"] = IosConnectionInfo(
+        ws=cast(Any, other), device_id=2, identifier="device-b"
+    )
+
+    event = AgentProgressEvent(
+        event="tools_started",
+        run_id="run-1",
+        agent="chat",
+        scope="foreground",
+        step=2,
+        max_steps=8,
+        tools=(
+            (
+                "draft_email",
+                {"to": ["user@example.com"], "subject": "Quarterly update", "body": "secret"},
+            ),
+        ),
+    )
+    await channel._send_agent_progress(event, "device-a")
+
+    assert len(foreground.sent) == 1
+    assert other.sent == []
+    assert foreground.sent[0]["type"] == "agent_progress"
+    assert foreground.sent[0]["tools"][0]["arguments"] == {
+        "to": ["user@example.com"],
+        "subject": "Quarterly update",
+    }
+
+    await channel._send_agent_progress(
+        AgentProgressEvent("run_started", "run-2", "collector", "background")
+    )
+    assert len(foreground.sent) == 2
+    assert len(other.sent) == 1
 
 
 async def _wait_for_server(channel: IosChannel) -> None:
