@@ -11,17 +11,31 @@ worked run and a healthy quiet read carry no flags.
 import json
 
 from penny.constants import PennyConstants
-from penny.database.memory import classify_run, half_formed_send_reason, render_run_record
+from penny.database.memory import (
+    LoggedToolCall,
+    classify_run,
+    half_formed_send_reason,
+    render_run_calls,
+    render_run_record,
+)
 from penny.database.models import PromptLog
+from penny.llm.models import LlmToolCallFunction
 from penny.text_validity import is_unfinished_fragment
 
 
-def _call(name: str, args: dict) -> dict:
+def _call(name: str, args: dict, call_id: str | None = None) -> dict:
+    """One wire-form tool call.  ``call_id`` defaults to the tool name; pass an
+    explicit id when a fixture repeats a tool so each call keys its own result."""
     return {
-        "id": name,
+        "id": call_id or name,
         "type": "function",
         "function": {"name": name, "arguments": json.dumps(args)},
     }
+
+
+def _tool_result(call_id: str, content: str) -> dict:
+    """One accumulated tool-result turn, keyed to its call id."""
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
 
 
 def _browse_messages(*, pages: int = 0, searches: int = 0, errors: int = 0) -> str:
@@ -42,19 +56,22 @@ def _prompt(
     *,
     outcome: str | None = None,
     reason: str | None = None,
-    target: str = "games",
+    target: str | None = "games",
     tool_failures: int | None = None,
     messages: str = "[]",
+    run_id: str = "r",
 ) -> PromptLog:
     """One promptlog row.  Only the run's LAST row carries outcome/tool_failures
     (that's how ``set_run_outcome`` stamps it); ``messages`` holds the tool-result
-    turns (browse sections) the I/O tally reads off the final prompt."""
+    turns (browse sections) the I/O tally reads off the final prompt.  ``target``
+    is ``None`` for chat-run fixtures (chat stamps no run_target); ``run_id`` is
+    fixed per fixture so whole-render literals are exact."""
     message: dict = {"role": "assistant", "content": "", "tool_calls": calls}
     return PromptLog(
         model="m",
         messages=messages,
         response=json.dumps({"choices": [{"message": message}]}),
-        run_id="r",
+        run_id=run_id,
         run_target=target,
         run_outcome=outcome,
         run_reason=reason,
@@ -305,3 +322,240 @@ def test_half_formed_send_reason_is_the_shared_rule():
     assert half_formed_send_reason("I don't know") is not None
     assert half_formed_send_reason("still uses the original …") is not None  # truncation tail
     assert half_formed_send_reason("Heads up — a new title dropped, details inside.") is None
+
+
+# ── Ledger provenance closure (#1560) ────────────────────────────────────────
+
+
+def test_logged_tool_call_round_trips_to_the_wire_form():
+    """A logged tool call and the outgoing wire call are the SAME structure —
+    ``replay(logged_call) == original_call`` (#1560).  The model emits a call as
+    ``{"name", "arguments": "<json>"}``; ``LoggedToolCall.from_function`` reads it,
+    ``to_wire`` re-emits the identical envelope, and re-parsing that envelope
+    through the executor's own boundary (``LlmToolCallFunction``) yields the same
+    name + arguments — so the logged form is canonical, never a paraphrase, and a
+    logged call could be re-executed unchanged (or promoted to a skill step by
+    copy)."""
+    original = {"name": "collection_write", "arguments": '{"memory": "watch", "entries": []}'}
+    logged = LoggedToolCall.from_function(original)
+    # Round-trip identity at the structured level.
+    assert LoggedToolCall.from_function(logged.to_wire()) == logged
+    # Replay through the SAME parse the executor uses: the re-emitted wire call
+    # produces the identical name + arguments as parsing the original would.
+    replayed = LlmToolCallFunction(
+        name=logged.to_wire()["name"], arguments=json.loads(logged.to_wire()["arguments"])
+    )
+    parsed_original = LlmToolCallFunction(
+        name=original["name"], arguments=json.loads(original["arguments"])
+    )
+    assert replayed == parsed_original
+
+
+# The run-calls render contract (#1560): every rendered surface the model reads is
+# asserted as its ENTIRE structure in ONE literal — a reviewer sees exactly what the
+# model sees.  The kitchen-sink case folds every input shape the surface can render
+# into one scenario; the sub-cases below isolate the variations (collector run,
+# pure-reply run with no egress, empty history).  Fixtures are fully deterministic:
+# fixed run ids, fixed call ids, fictional content.
+
+
+def _chat_kitchen_sink_run() -> list[PromptLog]:
+    """One chat run exercising EVERY shape the run-calls render can show: the
+    user's opening message, a browse step, a collection write with its gate
+    outcome, a mid-run rejected ``done()`` (the step-number GAP), a
+    generate_image with its media id, a failed call, a duplicate-rejected write,
+    the final reply, and the egress attachment."""
+    user_turn = {
+        "role": "user",
+        "content": f"Live context{PennyConstants.SECTION_SEPARATOR}"
+        "draw me a cartoon fox and log any new fox shows",
+    }
+    first = _prompt(
+        [_call("browse", {"queries": ["new fox cartoons"]})],
+        run_id="run-fixed",
+        target=None,
+        messages=json.dumps([user_turn]),
+    )
+    second = _prompt(
+        [
+            _call(
+                "collection_write",
+                {"memory": "shows", "entries": [{"key": "fox-tales", "content": "Fox Tales S2"}]},
+                call_id="w1",
+            ),
+            _call("done", {"success": True, "summary": "premature"}, call_id="d1"),
+        ],
+        run_id="run-fixed",
+        target=None,
+    )
+    third = _prompt(
+        [
+            _call("generate_image", {"description": "a cartoon fox"}, call_id="g1"),
+            _call("collection_get", {"memory": "old-shelf", "key": "fox tales"}, call_id="r1"),
+            _call(
+                "collection_write",
+                {
+                    "memory": "shows",
+                    "entries": [{"key": "fox-tales-2", "content": "Fox Tales again"}],
+                },
+                call_id="w2",
+            ),
+        ],
+        run_id="run-fixed",
+        target=None,
+    )
+    accumulated = [
+        user_turn,
+        _tool_result(
+            "browse", "## browse: https://example.com/fox-cartoons\nThree new fox shows reviewed."
+        ),
+        _tool_result("w1", "Wrote 1 entry: fox-tales."),
+        _tool_result("d1", "done() rejected — make a real tool call first."),
+        _tool_result("g1", f"{PennyConstants.GENERATED_IMAGE_RESULT_PREFIX}7 of: a cartoon fox."),
+        _tool_result("r1", "Memory 'old-shelf' not found."),
+        _tool_result("w2", "Duplicate of fox-tales."),
+    ]
+    final = PromptLog(
+        model="m",
+        messages=json.dumps(accumulated),
+        response=json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Done — logged the new season and drew your fox!",
+                        }
+                    }
+                ]
+            }
+        ),
+        run_id="run-fixed",
+        run_target=None,
+    )
+    return [first, second, third, final]
+
+
+def test_render_run_calls_chat_kitchen_sink_full_literal():
+    """The chat-run render contract, whole-output (#1560, criteria 3 + 5 + the
+    anchor invariant): the run names itself (``run <id>``), each step is the
+    canonical call projection with its compact result (``step <N>: <call> =>
+    <outcome>``), the mid-run rejected ``done()`` consumes step 3 and leaves a
+    visible GAP (numbers are persisted coordinates — never renumbered), the write
+    gate outcomes (written / duplicate-rejected) and the failed call render
+    honestly, and the egress trace names the delivered media by typed id — so a
+    delivery is inspected by a read, not confabulated."""
+    assert (
+        render_run_calls(_chat_kitchen_sink_run())
+        == """\
+run run-fixed
+user: draw me a cartoon fox and log any new fox shows
+    step 1: browse(['new fox cartoons']) => ## browse: https://example.com/fox-cartoons
+    step 2: collection_write(memory='shows', entries='Fox Tales S2') => Wrote 1 entry: fox-tales.
+    step 4: generate_image(description='a cartoon fox') => Generated image #7 of: a cartoon fox.
+    step 5: collection_get(memory='old-shelf', key='fox tales') => Memory 'old-shelf' not found.
+    step 6: collection_write(memory='shows', entries='Fox Tales again') => Duplicate of fox-tales.
+penny: Done — logged the new season and drew your fox!
+    attached: image #7"""
+    )
+
+
+def test_render_run_calls_collector_run_full_literal():
+    """A collector run through the same lens, whole-output: origin is the bound
+    target (no user message), steps are the canonical projection, and the
+    conclusion is the ``done()`` summary — no egress line (nothing attached)."""
+    run = [
+        _prompt(
+            [_call("browse", {"queries": ["budget handhelds"]})],
+            run_id="coll-fixed",
+        ),
+        _prompt(
+            [
+                _call(
+                    "collection_write",
+                    {
+                        "memory": "games",
+                        "entries": [{"key": "pocket-go", "content": "Pocket Go pick"}],
+                    },
+                    call_id="w1",
+                ),
+                _DONE_OK,
+            ],
+            run_id="coll-fixed",
+            outcome="worked",
+            reason="wrote one new find",
+            messages=json.dumps(
+                [
+                    _tool_result("browse", "## browse: https://example.com/budget\nBudget picks."),
+                    _tool_result("w1", "Wrote 1 entry: pocket-go."),
+                ]
+            ),
+        ),
+    ]
+    assert (
+        render_run_calls(run)
+        == """\
+run coll-fixed
+[games]
+    step 1: browse(['budget handhelds']) => ## browse: https://example.com/budget
+    step 2: collection_write(memory='games', entries='Pocket Go pick') => Wrote 1 entry: pocket-go.
+done: wrote one new find"""
+    )
+
+
+def test_render_run_calls_pure_reply_run_full_literal():
+    """A tool-less chat turn, whole-output: just the run id, the ask, and the
+    reply — no steps, no egress."""
+    turn = {
+        "role": "user",
+        "content": f"Live context{PennyConstants.SECTION_SEPARATOR}how are you?",
+    }
+    only = PromptLog(
+        model="m",
+        messages=json.dumps([turn]),
+        response=json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "doing great — thanks for asking!",
+                        }
+                    }
+                ]
+            }
+        ),
+        run_id="chat-quiet",
+        run_target=None,
+    )
+    assert (
+        render_run_calls([only])
+        == """\
+run chat-quiet
+user: how are you?
+penny: doing great — thanks for asking!"""
+    )
+
+
+def test_render_run_calls_empty_history():
+    """No prompts → the honest empty marker, not a fabricated frame."""
+    assert render_run_calls([]) == "(no data)"
+
+
+def test_render_run_calls_truncates_bulk_results_by_reference():
+    """Result-compaction logic (not a render contract): a bulk result renders as
+    its first line capped with an ellipsis — stored whole in the ledger, rendered
+    by reference.  The expected preview is computed (a 150-char run of x's is the
+    fixture), so this stays a logic test; the render contracts above are the
+    whole-output literals."""
+    long_line = "## browse: " + "x" * 150
+    run = [
+        _prompt(
+            [_call("browse", {"queries": ["a"]})],
+            run_id="run-long",
+            target=None,
+            messages=json.dumps([_tool_result("browse", f"{long_line}\npage body")]),
+        )
+    ]
+    expected_preview = f"{long_line[:120].rstrip()}…"
+    assert render_run_calls(run) == f"run run-long\n    step 1: browse(['a']) => {expected_preview}"
