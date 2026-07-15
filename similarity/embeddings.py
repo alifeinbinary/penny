@@ -49,6 +49,8 @@ def find_similar(
     """
     scored = []
     for item_id, embedding in candidates:
+        if len(embedding) != len(query):
+            continue
         score = cosine_similarity(query, embedding)
         if score >= threshold:
             scored.append((item_id, score))

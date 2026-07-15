@@ -169,10 +169,14 @@ class MediaStore:
         return chosen
 
     def _scored(self, embedding: list[float], rows: list[_Candidate]) -> list[tuple[int, float]]:
-        """(id, cosine) for ``rows``, nearest first, no floor."""
+        """(id, cosine) for ``rows`` of the same dimension, nearest first, no floor."""
         return find_similar(
             embedding,
-            [(row.id, row.vector) for row in rows if row.vector is not None],
+            [
+                (row.id, row.vector)
+                for row in rows
+                if row.vector is not None and len(row.vector) == len(embedding)
+            ],
             top_k=len(rows) or 1,
             threshold=-1.0,
         )
