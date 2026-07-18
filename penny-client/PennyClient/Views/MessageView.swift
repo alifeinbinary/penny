@@ -4,7 +4,6 @@ import UIKit
 struct MessageView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = ViewModel()
-    @State private var isMessageLayoutSwitcherEnabled = Prefs.shared.isMessageLayoutSwitcherEnabled
     @State private var isShowingActivity = false
     @State private var presentedCardMessage: ChatMessage?
     @State private var activeMessageContext: MessageActionContext?
@@ -12,7 +11,6 @@ struct MessageView: View {
     @State private var messageScrollFrames: [Int: CGRect] = [:]
     @State private var messageActionProxyHeights: [Int: CGFloat] = [:]
     @State private var messageContextScale: CGFloat = 1
-    @State private var shouldUseFastComposerScroll = false
     @State private var keyboardSettledScrollTask: Task<Void, Never>?
     @State private var typingIndicatorStatus = "Penny is typing"
     @State private var isTypingIndicatorVisible = false
@@ -22,38 +20,15 @@ struct MessageView: View {
     @State private var pendingIncomingAutoScrollMessageID: Int?
     @State private var lastTopScrolledMessageID: Int?
     @State private var chatViewportFrame: CGRect = .zero
-    @State private var messageLayoutSwitcherHeight: CGFloat = 0
     @State private var selectedPennyNavigation: PennyNavigationDestination?
     @FocusState private var isComposerFocused: Bool
-
-    private var effectiveMessageLayout: MessageLayout {
-        isMessageLayoutSwitcherEnabled ? viewModel.selectedMessageLayout : .message
-    }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if effectiveMessageLayout == .message {
-                    chatScrollView
-                } else {
-                    cardScrollView(layout: effectiveMessageLayout)
-                }
+                chatScrollView
             }
             .background(Color(.systemGroupedBackground).ignoresSafeArea())
-            .overlay(alignment: .top) {
-                if isMessageLayoutSwitcherEnabled {
-                    messageLayoutSelector
-                        .padding(.top, 10)
-                        .background {
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: MessageLayoutSwitcherHeightPreferenceKey.self,
-                                    value: geometry.size.height
-                                )
-                            }
-                        }
-                }
-            }
             .safeAreaInset(edge: .bottom) {
                 composer
             }
@@ -61,7 +36,6 @@ struct MessageView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     HStack(spacing: 8) {
-                        messageFilterMenu
                         pennyNavigationMenu
 
                         if viewModel.hasHiddenNewMessages {
@@ -76,8 +50,12 @@ struct MessageView: View {
 
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: 14) {
-                        Button {
-                            viewModel.isShowingSearch = true
+                        NavigationLink {
+                            MessageSearchView(client: viewModel.client) { message in
+                                withTransaction(Transaction(animation: .easeOut(duration: 0.12))) {
+                                    viewModel.startReply(to: message)
+                                }
+                            }
                         } label: {
                             Image(systemName: "magnifyingglass")
                                 .frame(width: 28, height: 28)
@@ -85,21 +63,10 @@ struct MessageView: View {
                         }
                         .buttonStyle(.borderless)
                         .foregroundStyle(.primary)
+                        .simultaneousGesture(TapGesture().onEnded {
+                            isComposerFocused = false
+                        })
                         .accessibilityLabel("Search messages")
-
-                        if viewModel.client.lastError != nil {
-                            Button {
-                                viewModel.isShowingConnectionError = true
-                            } label: {
-                                Image(systemName: "info.circle")
-                                    .frame(width: 28, height: 28)
-                                    .contentShape(Circle())
-                                    .foregroundStyle(.red)
-                            }
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(.primary)
-                            .accessibilityLabel("Connection error")
-                        }
 
                         Button {
                             viewModel.isShowingSettings = true
@@ -115,27 +82,8 @@ struct MessageView: View {
                     }
                 }
             }
-            .alert("Connection Error", isPresented: $viewModel.isShowingConnectionError, presenting: viewModel.client.lastError) { _ in
-                Button("Reconnect") {
-                    viewModel.reconnect()
-                }
-                Button("OK", role: .cancel) {}
-            } message: { errorMessage in
-                Text(errorMessage)
-            }
             .sheet(isPresented: $viewModel.isShowingSettings) {
                 SettingsView(client: viewModel.client)
-            }
-            .sheet(isPresented: $viewModel.isShowingSearch) {
-                MessageSearchView(client: viewModel.client) { message in
-                    withTransaction(Transaction(animation: .easeOut(duration: 0.12))) {
-                        viewModel.startReply(to: message)
-                    }
-                    Task { @MainActor in
-                        await Task.yield()
-                        isComposerFocused = true
-                    }
-                }
             }
             .sheet(isPresented: $isShowingActivity) {
                 AgentActivityView(client: viewModel.client)
@@ -154,15 +102,8 @@ struct MessageView: View {
             .onPreferenceChange(ChatViewportFramePreferenceKey.self) { frame in
                 chatViewportFrame = frame
             }
-            .onPreferenceChange(MessageLayoutSwitcherHeightPreferenceKey.self) { height in
-                messageLayoutSwitcherHeight = height
-            }
             .overlay {
                 messageActionOverlay
-            }
-            .onChange(of: viewModel.isShowingSettings) { _, isShowingSettings in
-                guard !isShowingSettings else { return }
-                refreshFeaturePreferences()
             }
         }
         .task {
@@ -177,7 +118,6 @@ struct MessageView: View {
         .onDisappear {
             keyboardSettledScrollTask?.cancel()
             typingIndicatorFadeTask?.cancel()
-            viewModel.disconnect()
         }
     }
 
@@ -190,7 +130,7 @@ struct MessageView: View {
                     topMessageLoader(proxy: proxy)
 
                     if viewModel.displayedMessages.isEmpty {
-                        EmptyMessageFilterView(filter: viewModel.selectedMessageFilter)
+                        EmptyMessageFilterView(filter: .all)
                     } else {
                         messageGrid(layout: .message) { message in
                             scrollToMessageTopIfNeeded(message.id, with: proxy)
@@ -297,44 +237,6 @@ struct MessageView: View {
         viewModel.client.foregroundProgress?.currentStatus ?? "Penny is typing"
     }
 
-    private func cardScrollView(layout: MessageLayout) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(spacing: 12) {
-                    olderMessagesLoader(proxy: proxy)
-
-                    topMessageLoader(proxy: proxy)
-
-                    if viewModel.displayedMessages.isEmpty {
-                        EmptyMessageFilterView(filter: viewModel.selectedMessageFilter)
-                    } else {
-                        messageGrid(layout: layout)
-                    }
-
-                    bottomSpacer
-                }
-                .padding(.horizontal, layout.horizontalPadding)
-                .padding(.top, messageListTopPadding)
-            }
-            .background(Color(.systemGroupedBackground))
-            .coordinateSpace(name: messageScrollCoordinateSpace)
-            .scrollDismissesKeyboard(.interactively)
-            .onAppear {
-                scheduleScrollToBottom(with: proxy, animated: false)
-            }
-            .onChange(of: viewModel.displayedMessages.map(\.id)) { previousIDs, currentIDs in
-                prepareArrivalAnimations(previousIDs: previousIDs, currentIDs: currentIDs)
-            }
-            .onChange(of: viewModel.scrollToBottomRequest) { _, _ in
-                scheduleScrollToBottom(
-                    with: proxy,
-                    animated: false,
-                    shouldSettleLayout: viewModel.shouldSettleScrollToBottom
-                )
-            }
-        }
-    }
-
     private var pennyNavigationMenu: some View {
         Menu {
             ForEach(PennyNavigationDestination.allCases) { destination in
@@ -364,30 +266,10 @@ struct MessageView: View {
         }
     }
 
-    private var messageFilterMenu: some View {
-        Menu {
-            Picker("Filter Messages", selection: $viewModel.selectedMessageFilter) {
-                ForEach(MessageFilter.allCases) { filter in
-                    Label(filter.title, systemImage: filter.systemImage)
-                        .tag(filter)
-                }
-            }
-        } label: {
-            Image(systemName: viewModel.selectedMessageFilter == .all ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
-                .frame(width: 28, height: 28)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.borderless)
-        .foregroundStyle(.primary)
-        .accessibilityLabel("Filter messages")
-        .accessibilityValue(viewModel.selectedMessageFilter.title)
-    }
-
     private var hiddenNewMessagesButton: some View {
         Button {
             Task {
                 await viewModel.clearFiltersAndShowNewMessages()
-                viewModel.selectedMessageLayout = .message
             }
         } label: {
             Image(systemName: "message.badge")
@@ -397,28 +279,6 @@ struct MessageView: View {
         .buttonStyle(.borderless)
         .foregroundStyle(Color.accentColor)
         .accessibilityLabel("Show new messages")
-    }
-
-    private var messageLayoutSelector: some View {
-        HStack(spacing: 4) {
-            ForEach(MessageLayout.allCases) { layout in
-                Button {
-                    changeMessageLayout(to: layout)
-                } label: {
-                    Image(systemName: viewModel.selectedMessageLayout == layout ? "\(layout.rawValue).circle.fill" : layout.systemImage)
-                        .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 36, height: 32)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(viewModel.selectedMessageLayout == layout ? Color.accentColor : .secondary)
-                .accessibilityLabel("\(layout.title) layout")
-            }
-        }
-        .padding(4)
-        .glassEffect(.regular, in: .capsule)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Message layout")
     }
 
     private var titleBar: some View {
@@ -678,25 +538,6 @@ private extension MessageView {
             }
     }
 
-    func refreshFeaturePreferences() {
-        isMessageLayoutSwitcherEnabled = Prefs.shared.isMessageLayoutSwitcherEnabled
-    }
-
-    func changeMessageLayout(to layout: MessageLayout) {
-        guard viewModel.selectedMessageLayout != layout else { return }
-        if layout != .message {
-            isComposerFocused = false
-            keyboardSettledScrollTask?.cancel()
-        }
-
-        var transaction = Transaction(animation: .spring(response: 0.34, dampingFraction: 0.86))
-        transaction.disablesAnimations = false
-        withTransaction(transaction) {
-            viewModel.selectedMessageLayout = layout
-        }
-        viewModel.requestScrollToBottom()
-    }
-
     func scheduleScrollToBottom(
         with proxy: ScrollViewProxy,
         animated: Bool = true,
@@ -792,13 +633,11 @@ private extension MessageView {
     }
 
     var chatViewportTopOcclusion: CGFloat {
-        isMessageLayoutSwitcherEnabled ? messageListTopPadding : 0
+        0
     }
 
     var messageListTopPadding: CGFloat {
-        guard isMessageLayoutSwitcherEnabled else { return 12 }
-        let measuredSwitcherHeight = messageLayoutSwitcherHeight > 0 ? messageLayoutSwitcherHeight : 50
-        return measuredSwitcherHeight + 8
+        12
     }
 
     func shouldScrollToMessage(_ id: Int) -> Bool {
@@ -807,7 +646,6 @@ private extension MessageView {
     }
 
     func incomingMessageAutoScrollDestination(for id: Int) -> IncomingMessageAutoScrollDestination? {
-        guard effectiveMessageLayout == .message else { return .bottomAnchor }
         guard let message = viewModel.displayedMessages.last(where: { $0.id == id }) else { return nil }
         guard !message.isOutgoing else { return .bottomAnchor }
         guard let frame = messageFrames[id], visibleChatViewportFrame.height > 0 else { return nil }
@@ -871,7 +709,7 @@ private extension MessageView {
             measuredHeight: measuredProxyHeight,
             maxHeight: maximumProxyHeight
         )
-        let fallbackProxyHeight = effectiveMessageLayout == .message ? context.frame.height : maximumProxyHeight
+        let fallbackProxyHeight = context.frame.height
         let proxyHeight = shouldScrollProxy ? maximumProxyHeight : min(maximumProxyHeight, max(1, measuredProxyHeight ?? fallbackProxyHeight))
         let stackHeight = proxyHeight + estimatedMenuHeight + stackSpacing
         let leading = actionProxyLeading(for: context, width: stackWidth, in: containerSize)
@@ -921,17 +759,11 @@ private extension MessageView {
 
     func actionProxyWidth(for context: MessageActionContext, in containerSize: CGSize) -> CGFloat {
         let maximumWidth = max(1, containerSize.width - MessageLayout.message.horizontalPadding * 2)
-        guard effectiveMessageLayout != .message else {
-            return min(max(1, context.frame.width), maximumWidth)
-        }
-        return maximumWidth
+        return min(max(1, context.frame.width), maximumWidth)
     }
 
     func actionProxyLeading(for context: MessageActionContext, width: CGFloat, in containerSize: CGSize) -> CGFloat {
         let maximumLeading = max(MessageLayout.message.horizontalPadding, containerSize.width - width - MessageLayout.message.horizontalPadding)
-        if effectiveMessageLayout != .message {
-            return context.message.isOutgoing ? maximumLeading : MessageLayout.message.horizontalPadding
-        }
         return min(max(MessageLayout.message.horizontalPadding, context.frame.minX), maximumLeading)
     }
 
@@ -943,7 +775,7 @@ private extension MessageView {
         if let measuredHeight {
             return measuredHeight > maxHeight
         }
-        return context.frame.height > maxHeight || (effectiveMessageLayout != .message && context.message.content.count > 280)
+        return context.frame.height > maxHeight
     }
 
     @ViewBuilder
@@ -970,7 +802,6 @@ private extension MessageView {
     func messageActionMenu(for message: ChatMessage) -> some View {
         VStack(spacing: 0) {
             Button {
-                shouldUseFastComposerScroll = true
                 withTransaction(Transaction(animation: .easeOut(duration: 0.12))) {
                     viewModel.startReply(to: message)
                     dismissMessageActions()
@@ -1108,15 +939,6 @@ private struct ChatViewportFramePreferenceKey: PreferenceKey {
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         let next = nextValue()
         value = next.height > 0 ? next : value
-    }
-}
-
-private struct MessageLayoutSwitcherHeightPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        value = next > 0 ? next : value
     }
 }
 
@@ -1308,6 +1130,20 @@ private struct AgentActivityView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Connection") {
+                    LabeledContent("Status", value: client.statusText)
+
+                    if let error = client.lastError {
+                        Text(error)
+                            .font(.subheadline)
+                            .foregroundStyle(.red)
+
+                        Button("Reconnect", systemImage: "arrow.clockwise") {
+                            client.reconnect()
+                        }
+                    }
+                }
+
                 if let foreground = client.foregroundProgress {
                     Section("Current message") {
                         progressRun(foreground)
