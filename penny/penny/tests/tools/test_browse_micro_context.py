@@ -194,11 +194,13 @@ async def test_extract_keeps_page_body_out_of_main_context(tmp_path, mock_llm):
 
     result = await tool.execute(queries=[_PAGE_URL], extract=_INSTRUCTION)
 
-    # The tool result carries the typed value + a handle, never the page body.
+    # The tool result carries the typed value alone — never the page body, and
+    # no fetch-handle tail (success renders the value only; the old "saved to
+    # browse-results#N" line read as the remembering being done).
     assert _EXTRACTED_VALUE in result.message
     assert _BODY_PHRASE not in result.message
     assert "Closes Friday" not in result.message
-    assert _HANDLE_RE.search(result.message) is not None
+    assert _HANDLE_RE.search(result.message) is None
     assert result.success is True
     # Byte-identical: the extracted value renders verbatim UNDER this page's own
     # section header (per-page extraction, #1682) — no re-transcription by the parent.
@@ -212,14 +214,12 @@ async def test_extract_keeps_page_body_out_of_main_context(tmp_path, mock_llm):
     assert _EXTRACTED_VALUE in framed
     assert _BODY_PHRASE not in framed
 
-    # The full page content is stored whole in browse-results and retrievable by
-    # its handle (the anchor discipline).
-    handle_id = int(cast("re.Match[str]", _HANDLE_RE.search(result.message)).group(1))
+    # The full page content is still stored whole in browse-results (the render
+    # dropped the handle line, not the storage).
     browse_log = db.memory(PennyConstants.MEMORY_BROWSE_RESULTS_LOG)
     assert browse_log is not None
-    fetched = browse_log.entry_by_id(handle_id)
-    assert fetched is not None
-    assert _BODY_PHRASE in fetched.content
+    stored_entries = browse_log.read_recent(window_seconds=3600, cap=None)
+    assert any(_BODY_PHRASE in entry.content for entry in stored_entries)
 
     # The micro-context is a ledger-visible model call with an honest attribution.
     with Session(db.engine) as session:
@@ -292,12 +292,11 @@ async def test_micro_result_render_forms(tmp_path):
     extracted, not-present, failed-after-reroll (untagged), and poison-then-failed."""
     header = f"{PennyConstants.BROWSE_PAGE_HEADER}{_PAGE_URL}\n"
 
-    result, handle_id = await _execute_extract(tmp_path, "ok", _TAGGED_VALUE)
-    assert result.message == (
-        f"{header}"
-        f"{_EXTRACTED_VALUE}\n\n"
-        f"Full page content saved to browse-results#{handle_id} — read it there for anything more."
-    )
+    # Success renders the VALUE ALONE — no fetch-handle tail ("saved to
+    # browse-results#N" read as the remembering being done on the chat teach
+    # round; the failure renders below keep the handle as their remedy).
+    result, _handle_id = await _execute_extract(tmp_path, "ok", _TAGGED_VALUE)
+    assert result.message == f"{header}{_EXTRACTED_VALUE}"
     assert result.success is True
 
     result, handle_id = await _execute_extract(tmp_path, "absent", _TAGGED_NOT_PRESENT)
@@ -363,13 +362,12 @@ async def test_two_page_batch_yields_two_attributed_sections(tmp_path, mock_llm)
     assert _EXTRACTED_VALUE in sections[0]
     assert sections[1].startswith(f"{PennyConstants.BROWSE_PAGE_HEADER}{_PAGE_URL_2}\n")
     assert _EXTRACTED_VALUE_2 in sections[1]
-    # ...and no value bleeds across sources; each section carries exactly one handle.
+    # ...and no value bleeds across sources; success sections carry the value
+    # alone (no fetch-handle tail).
     assert _EXTRACTED_VALUE_2 not in sections[0]
     assert _EXTRACTED_VALUE not in sections[1]
-    handles_1, handles_2 = _HANDLE_RE.findall(sections[0]), _HANDLE_RE.findall(sections[1])
-    assert len(handles_1) == 1
-    assert len(handles_2) == 1
-    assert handles_1 != handles_2
+    assert _HANDLE_RE.search(sections[0]) is None
+    assert _HANDLE_RE.search(sections[1]) is None
     assert result.success is True
 
     # N pages → N attributed ledger rows (one micro-call per page).
@@ -433,10 +431,10 @@ async def test_failed_fetch_section_coexists_with_extracted_section(tmp_path):
     assert sections[0].startswith(f"{PennyConstants.BROWSE_ERROR_HEADER}{_PAGE_URL}")
     assert "Could not read this page" in sections[0]
     assert _HANDLE_RE.search(sections[0]) is None
-    # The successful page still extracts, under its own header + its own handle.
+    # The successful page still extracts, under its own header — value alone.
     assert sections[1].startswith(f"{PennyConstants.BROWSE_PAGE_HEADER}{_PAGE_URL_2}\n")
     assert _EXTRACTED_VALUE_2 in sections[1]
-    assert len(_HANDLE_RE.findall(sections[1])) == 1
+    assert _HANDLE_RE.search(sections[1]) is None
     assert result.success is True
 
 
@@ -578,14 +576,25 @@ async def test_micro_context_poison_is_discarded_and_rerolled():
 
 
 def test_micro_result_render_by_handle_is_a_typed_id(tmp_path):
-    """The fetch handle is a typed ``<memory>#<id>`` anchor (rendered directly)."""
+    """The fetch handle is a typed ``<memory>#<id>`` anchor (rendered directly) —
+    on the FAILURE renders, where it is the remedy.  A successful extraction
+    renders the value alone: the old "saved to browse-results#N" tail read as
+    the remembering being done at exactly the moment a chat teach round held
+    the value (2026-07-19), so success carries no handle clause."""
     tool = BrowseTool(max_calls=1, embedding_client=cast(Any, MockLlmClient()))
+    stored = [cast(Any, SimpleNamespace(id=7))]
     body = tool._render_micro_result(
         MicroContextResult(outcome=MicroExtractOutcome.EXTRACTED, value=_EXTRACTED_VALUE),
         _INSTRUCTION,
-        [cast(Any, SimpleNamespace(id=7))],
+        stored,
+    )
+    assert body == _EXTRACTED_VALUE
+    body = tool._render_micro_result(
+        MicroContextResult(outcome=MicroExtractOutcome.NOT_PRESENT, reason="no bid listed."),
+        _INSTRUCTION,
+        stored,
     )
     assert body == (
-        f"{_EXTRACTED_VALUE}\n\n"
+        "The page doesn't contain 'the current bid amount' — no bid listed. "
         "Full page content saved to browse-results#7 — read it there for anything more."
     )
