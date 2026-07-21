@@ -25,6 +25,7 @@ import pytest
 from penny.database import Database
 from penny.tests.eval.conftest import (
     ChatEval,
+    Check,
     _InjectFictitiousToolPrompt,
     seed_collection,
 )
@@ -80,26 +81,43 @@ def _seed(db: Database) -> None:
     )
 
 
-def _score_recovered(db: Database, before: set[str], reply: str) -> list[str]:
-    """Pass iff a corrected update landed: the stored prompt has no fictitious call
-    and differs from the seed (the rejected ``extract_text`` update never persists, so
-    a changed prompt is proof the model recovered with a valid rewrite)."""
+def _score_recovered(db: Database, before: set[str], reply: str) -> list[Check]:
+    """Graded: a corrected update landed — the stored prompt has no fictitious call and differs
+    from the seed (the rejected ``extract_text`` update never persists, so a changed prompt is
+    proof the model recovered with a valid rewrite).
+
+    The 'forced bail fired — contract exercised' guard is PREPENDED by ``chat_eval``'s graded path
+    (#1697) — the forced fictitious-tool update is refused by the extraction-prompt gate, so a run
+    that never triggered it can't pass — and this scorer owns only the recovery outcome."""
     row = db.memories.get(_COLLECTION)
     stored = row.extraction_prompt if row is not None else ""
-    fails: list[str] = []
-    if stored is not None and "extract_text" in stored:
-        fails.append(f"recovery failed — extract_text persisted in the prompt: {stored[:160]!r}")
-    if stored == _SEED_PROMPT:
-        fails.append(
-            "no corrected update landed — prompt unchanged from the seed; the model "
-            "gave up or kept re-emitting the fictitious call instead of rewriting it"
-        )
-    return fails
+    has_fictitious = stored is not None and "extract_text" in stored
+    changed = stored != _SEED_PROMPT
+    return [
+        Check(
+            "no fictitious tool persisted in the prompt",
+            not has_fictitious,
+            rationale=f"extract_text persisted in the prompt: {(stored or '')[:160]!r}"
+            if has_fictitious
+            else None,
+        ),
+        Check(
+            "a corrected update landed (prompt changed from the seed)",
+            changed,
+            rationale=None
+            if changed
+            else (
+                "prompt unchanged from the seed — the model gave up or kept re-emitting "
+                "the fictitious call"
+            ),
+        ),
+    ]
 
 
 async def test_fictitious_extraction_tool_is_rejected_and_recovers(chat_eval: ChatEval) -> None:
     await chat_eval(
         case_id="extraction-tool-recovery",
+        family="chat-recovery",
         message=_USER_MESSAGE,
         seed=_seed,
         wrap_client=lambda real: _InjectFictitiousToolPrompt(real, _COLLECTION, _FICTITIOUS_PROMPT),

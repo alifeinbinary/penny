@@ -31,7 +31,7 @@ from __future__ import annotations
 import pytest
 
 from penny.database import Database
-from penny.tests.eval.conftest import ChatEval, _InjectTextBail
+from penny.tests.eval.conftest import ChatEval, Check, _InjectTextBail
 from penny.tests.eval.fixtures import TOPIC_PAGES
 from penny.validation.response_validators import is_call_as_text_bail
 
@@ -45,23 +45,38 @@ _CALL_AS_TEXT = (
 )
 
 
-def _score_recovered(db: Database, before: set[str], reply: str) -> list[str]:
-    """Pass iff the forced call-as-text bail did NOT reach the user as raw JSON and
-    the reply is substantive prose (the model recovered into a real answer or an
-    honest dead-end, rather than the loop finalizing the JSON blob)."""
-    fails: list[str] = []
-    if is_call_as_text_bail(reply):
-        fails.append(
-            f"reply is a serialized tool call, not prose — bail reached the user: {reply[:120]!r}"
-        )
-    if sum(1 for character in reply if character.isalpha()) < 15:
-        fails.append(f"reply is not substantive prose: {reply[:120]!r}")
-    return fails
+def _score_recovered(db: Database, before: set[str], reply: str) -> list[Check]:
+    """Graded: the forced call-as-text bail did NOT reach the user as raw JSON and the reply is
+    substantive prose (the model recovered into a real answer or an honest dead-end, rather than
+    the loop finalizing the JSON blob).
+
+    The 'forced bail fired — contract exercised' guard is PREPENDED by ``chat_eval``'s graded path
+    (#1697) — so a run that never triggered the bail can't pass on a normal answer — and this
+    scorer owns only the recovery outcome."""
+    alpha = sum(1 for character in reply if character.isalpha())
+    is_bail = is_call_as_text_bail(reply)
+    return [
+        Check(
+            "reply is prose, not a serialized tool call",
+            not is_bail,
+            rationale=None
+            if not is_bail
+            else f"reply is a serialized tool call — bail reached the user: {reply[:120]!r}",
+        ),
+        Check(
+            "reply is substantive prose",
+            alpha >= 15,
+            rationale=None
+            if alpha >= 15
+            else f"reply is not substantive prose ({alpha} chars): {reply[:120]!r}",
+        ),
+    ]
 
 
 async def test_call_as_text_is_caught_and_recovers(chat_eval: ChatEval) -> None:
     await chat_eval(
         case_id="chat-call-as-text-recovery",
+        family="chat-recovery",
         message="what's the deepest lake in the world?",
         browse=list(TOPIC_PAGES),
         wrap_client=lambda real: _InjectTextBail(real, _CALL_AS_TEXT),
