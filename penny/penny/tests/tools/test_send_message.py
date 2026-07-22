@@ -22,18 +22,14 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from penny.database import Database
 from penny.tools.models import SendMessageArgs
 from penny.tools.send_message import SendMessageTool
 
+pytestmark = pytest.mark.bare_db
+
+
 _RECIPIENT = "+15551234567"
 _AGENT = "notify"
-
-
-def _make_db(tmp_path) -> Database:
-    db = Database(str(tmp_path / "test.db"))
-    db.create_tables()
-    return db
 
 
 def _make_tool(db) -> SendMessageTool:
@@ -48,9 +44,8 @@ def _make_tool(db) -> SendMessageTool:
 
 
 @pytest.mark.asyncio
-async def test_send_message_enqueues_when_not_gated(tmp_path):
+async def test_send_message_enqueues_when_not_gated(db):
     """Happy path: no mute, valid content → message appended to the send queue."""
-    db = _make_db(tmp_path)
     tool = _make_tool(db)
 
     result = await tool.execute(content="hey there!")
@@ -66,9 +61,8 @@ async def test_send_message_enqueues_when_not_gated(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_send_message_refuses_when_user_muted(tmp_path):
+async def test_send_message_refuses_when_user_muted(db):
     """Muted recipient: tool refuses without enqueueing."""
-    db = _make_db(tmp_path)
     db.users.set_muted(_RECIPIENT)
     tool = _make_tool(db)
 
@@ -84,9 +78,8 @@ async def test_send_message_refuses_when_user_muted(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_send_message_refuses_when_content_is_a_refusal(tmp_path):
+async def test_send_message_refuses_when_content_is_a_refusal(db):
     """Refusal content ("I'm sorry, I can't...") is not enqueued as a reply."""
-    db = _make_db(tmp_path)
     tool = _make_tool(db)
 
     result = await tool.execute(
@@ -102,7 +95,7 @@ async def test_send_message_refuses_when_content_is_a_refusal(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_refuses_half_formed_with_actionable_error(tmp_path):
+async def test_run_refuses_half_formed_with_actionable_error(db):
     """Going through ``Tool.run`` (the executor's entry point), a half-formed body
     is refused by the ``args_model`` validator with a ``success=False`` actionable
     error tool response — names the field + the SPECIFIC defect + the next move —
@@ -110,7 +103,6 @@ async def test_run_refuses_half_formed_with_actionable_error(tmp_path):
     trails off into a degenerate tail; the message names that and how to fix it
     (finish the sentence), NOT the old misdirecting generic "send the COMPLETE
     message" (which read as wrong when the send was already substantive)."""
-    db = _make_db(tmp_path)
     tool = _make_tool(db)
 
     result = await tool.run(content="Hi there! ......???")
@@ -124,10 +116,9 @@ async def test_run_refuses_half_formed_with_actionable_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_send_message_allows_conversational_mid_sentence_ellipsis(tmp_path):
+async def test_send_message_allows_conversational_mid_sentence_ellipsis(db):
     """A '…' followed by trailing text (e.g. 'Anyway… 🤓') is a complete
     message, not a truncation — the tool enqueues it normally."""
-    db = _make_db(tmp_path)
     tool = _make_tool(db)
 
     result = await tool.execute(content="anyway… that's the gist 🤓")
@@ -139,13 +130,12 @@ async def test_send_message_allows_conversational_mid_sentence_ellipsis(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_send_message_refuses_when_no_primary_user(tmp_path):
+async def test_send_message_refuses_when_no_primary_user(db):
     """No registered user → no recipient → decline without enqueueing, naming the
     real condition (an environment/config state) and binding the terminal move.
     This decline must be DISTINCT from the refusal-content decline: telling the
     model its content read as a refusal would misdirect it into pointlessly
     rewriting a fine message when the actual fault is that no recipient exists."""
-    db = _make_db(tmp_path)
     tool = SendMessageTool(agent_name=_AGENT, db=db)  # no save_info → no primary sender
 
     result = await tool.execute(content="hello?")
@@ -207,9 +197,8 @@ def test_send_message_args_rejects_half_formed_bodies():
         SendMessageArgs(content=body)  # must not raise
 
 
-def test_send_queue_store_round_trip(tmp_path):
+def test_send_queue_store_round_trip(db):
     """Enqueue → next_pending (FIFO) → mark_sent removes it from the pending tail."""
-    db = _make_db(tmp_path)
     first = db.send_queue.enqueue(content="one", collection="likes")
     db.send_queue.enqueue(content="two", collection="notified-thoughts")
 
