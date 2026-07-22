@@ -1,0 +1,214 @@
+"""Tests for the InvoiceNinja plugin."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+
+from penny.plugins.invoiceninja import InvoiceNinjaPlugin
+from penny.plugins.invoiceninja.client import InvoiceNinjaClient
+
+
+def test_invoice_ninja_plugin_not_configured():
+    config = MagicMock()
+    config.invoiceninja_api_token = None
+    config.invoiceninja_url = "https://example.com"
+    assert InvoiceNinjaPlugin.is_configured(config) is False
+
+
+def test_invoice_ninja_plugin_configured():
+    config = MagicMock()
+    config.invoiceninja_api_token = "token"
+    config.invoiceninja_url = "https://example.com"
+    assert InvoiceNinjaPlugin.is_configured(config) is True
+
+
+def test_invoice_ninja_plugin_provides_tools():
+    config = MagicMock()
+    config.invoiceninja_api_token = "token"
+    config.invoiceninja_url = "https://example.com"
+    plugin = InvoiceNinjaPlugin(config)
+    tools = plugin.get_tools()
+    assert len(tools) == 6
+    assert {tool.name for tool in tools} == {
+        "create_expense",
+        "get_expense",
+        "list_expenses",
+        "list_invoices",
+        "update_expense",
+        "verify_invoiceninja_auth",
+    }
+
+
+def test_client_sets_required_auth_headers():
+    with patch("penny.plugins.invoiceninja.client.httpx.AsyncClient") as mock_client_cls:
+        InvoiceNinjaClient(api_token="test-token", base_url="https://invoicing.example.com")
+    mock_client_cls.assert_called_once_with(
+        timeout=30.0,
+        headers={
+            "X-API-TOKEN": "test-token",
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/json",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_auth_hits_health_check_endpoint():
+    request = httpx.Request("GET", "https://invoicing.example.com/api/v1/health_check")
+    with patch("penny.plugins.invoiceninja.client.httpx.AsyncClient") as mock_client_cls:
+        client = InvoiceNinjaClient(
+            api_token="test-token", base_url="https://invoicing.example.com"
+        )
+        mock_http = mock_client_cls.return_value
+        mock_http.get = AsyncMock(
+            return_value=httpx.Response(200, json={"status": "ok"}, request=request)
+        )
+        result = await client.verify_auth()
+    assert result is True
+    mock_http.get.assert_awaited_once_with("https://invoicing.example.com/api/v1/health_check")
+
+
+@pytest.mark.asyncio
+async def test_verify_auth_raises_on_invalid_token():
+    request = httpx.Request("GET", "https://invoicing.example.com/api/v1/health_check")
+    with patch("penny.plugins.invoiceninja.client.httpx.AsyncClient") as mock_client_cls:
+        client = InvoiceNinjaClient(api_token="bad-token", base_url="https://invoicing.example.com")
+        mock_http = mock_client_cls.return_value
+        mock_http.get = AsyncMock(
+            return_value=httpx.Response(403, json={"message": "Invalid token"}, request=request)
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.verify_auth()
+
+
+@pytest.mark.asyncio
+async def test_create_expense_posts_required_fields():
+    request = httpx.Request("POST", "https://invoicing.example.com/api/v1/expenses")
+    expense_response = {
+        "id": "exp1",
+        "amount": 45.0,
+        "date": "2026-07-22",
+        "status": "logged",
+        "vendor_id": "ven1",
+        "category_id": "cat1",
+    }
+    with patch("penny.plugins.invoiceninja.client.httpx.AsyncClient") as mock_client_cls:
+        client = InvoiceNinjaClient(
+            api_token="test-token", base_url="https://invoicing.example.com"
+        )
+        mock_http = mock_client_cls.return_value
+        mock_http.post = AsyncMock(
+            return_value=httpx.Response(200, json={"data": expense_response}, request=request)
+        )
+        result = await client.create_expense(
+            amount=45.0,
+            date="2026-07-22",
+            vendor_id="ven1",
+            category_id="cat1",
+            public_notes="Coffee",
+        )
+    assert result.id == "exp1"
+    assert result.amount == 45.0
+    mock_http.post.assert_awaited_once()
+    call_args = mock_http.post.call_args
+    assert call_args[0][0] == "https://invoicing.example.com/api/v1/expenses"
+    assert call_args[1]["json"]["date"] == "2026-07-22"
+    assert call_args[1]["json"]["amount"] == 45.0
+    assert call_args[1]["json"]["vendor_id"] == "ven1"
+    assert call_args[1]["json"]["category_id"] == "cat1"
+    assert call_args[1]["json"]["public_notes"] == "Coffee"
+
+
+@pytest.mark.asyncio
+async def test_list_expenses_returns_parsed_expenses():
+    request = httpx.Request("GET", "https://invoicing.example.com/api/v1/expenses")
+    with patch("penny.plugins.invoiceninja.client.httpx.AsyncClient") as mock_client_cls:
+        client = InvoiceNinjaClient(
+            api_token="test-token", base_url="https://invoicing.example.com"
+        )
+        mock_http = mock_client_cls.return_value
+        mock_http.get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "exp1",
+                            "amount": 45.0,
+                            "date": "2026-07-22",
+                            "status": "logged",
+                            "public_notes": "Coffee",
+                        }
+                    ]
+                },
+                request=request,
+            )
+        )
+        expenses = await client.list_expenses(status="logged", limit=10)
+    assert len(expenses) == 1
+    assert expenses[0].id == "exp1"
+    assert expenses[0].status == "logged"
+    mock_http.get.assert_awaited_once_with(
+        "https://invoicing.example.com/api/v1/expenses",
+        params={"per_page": "10", "status": "logged"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_expense_fetches_by_id():
+    request = httpx.Request("GET", "https://invoicing.example.com/api/v1/expenses/exp1")
+    with patch("penny.plugins.invoiceninja.client.httpx.AsyncClient") as mock_client_cls:
+        client = InvoiceNinjaClient(
+            api_token="test-token", base_url="https://invoicing.example.com"
+        )
+        mock_http = mock_client_cls.return_value
+        mock_http.get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "id": "exp1",
+                        "amount": 45.0,
+                        "date": "2026-07-22",
+                        "status": "logged",
+                    }
+                },
+                request=request,
+            )
+        )
+        expense = await client.get_expense("exp1")
+    assert expense.id == "exp1"
+    mock_http.get.assert_awaited_once_with("https://invoicing.example.com/api/v1/expenses/exp1")
+
+
+@pytest.mark.asyncio
+async def test_update_expense_puts_only_changed_fields():
+    request = httpx.Request("PUT", "https://invoicing.example.com/api/v1/expenses/exp1")
+    with patch("penny.plugins.invoiceninja.client.httpx.AsyncClient") as mock_client_cls:
+        client = InvoiceNinjaClient(
+            api_token="test-token", base_url="https://invoicing.example.com"
+        )
+        mock_http = mock_client_cls.return_value
+        mock_http.put = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "id": "exp1",
+                        "amount": 50.0,
+                        "date": "2026-07-22",
+                        "status": "logged",
+                    }
+                },
+                request=request,
+            )
+        )
+        result = await client.update_expense("exp1", amount=50.0)
+    assert result.amount == 50.0
+    mock_http.put.assert_awaited_once()
+    call_args = mock_http.put.call_args
+    assert call_args[0][0] == "https://invoicing.example.com/api/v1/expenses/exp1"
+    assert call_args[1]["json"] == {"amount": 50.0}
