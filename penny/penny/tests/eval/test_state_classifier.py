@@ -1,4 +1,4 @@
-"""Per-edge conversation-state classifier contracts (#1706, beats 1–2): the
+"""Per-edge conversation-state classifier contracts (#1706, beats 1–4): the
 idle out-edges, every direction, from the cold-start shape through a populated
 skill registry.
 
@@ -11,11 +11,14 @@ the beat-1 and beat-2 cases is exactly what varies in production: whether the
 registry holds skills.
 
 **Beat 1 (empty registry — the cold-start shape)**: apply is structurally
-withheld, the live union is elicit vs idle.  FIRE = request-shaped asks for
-routines nothing covers; HOLD = ordinary conversation incl. the named boundary
-case — a PASSING MENTION of a watchable thing (recurrence words describing the
-USER's own habit, topic twins of fire phrasings).  Gated at 0.8 (two clean 1.00
-baseline runs at N=10, turn-audited).
+withheld, the live union is learn vs elicit vs idle.  FIRE = request-shaped asks
+for routines nothing covers (no steps in the message → elicit); HOLD = ordinary
+conversation incl. the named boundary case — a PASSING MENTION of a watchable
+thing (recurrence words describing the USER's own habit, topic twins of fire
+phrasings).  UNPROMPTED TEACHING = the same intents but WITH the steps in the
+message → learn directly, skipping the teach question; fire is its paired guard
+(same asks, no steps).  Gated at 0.8 (two clean 1.00 baseline runs at N=10,
+turn-audited).
 
 **Beat 2 (two seeded skills — a price-watch plus a distractor)**: the union
 grows to three and the apply draw must ALSO bind WHICH skill (the SKILL: line,
@@ -34,7 +37,18 @@ the parked-snapshot fields' first live use), and the user's reply resolves it:
 STEPS = instructions telling the assistant HOW (→ learn, incl. schedule-worded
 steps as realistic difficulty); CLARIFYING = questions back / partials without
 the how (→ elicit); BAIL = call-offs and topic changes (→ idle, the break-out
-edge).  Report-only until baselines are read.
+edge).
+
+**Beat 4 (parked learn — re-entry after a failed demo round)**: the machine is
+parked in learn (the demo round did not complete; ``penny_last_turn`` = the
+honest failure report), and the user's reply resolves it: learn is TWO-WAY
+(code-owner ruling: elicit exists to GET instructions, so once they have been
+given there is no going back to it — the user either provides instructions or
+the machine falls to idle).  Parked learn is BINARY: a corrected
+set of instructions (→ learn), or a bail (→ idle).  RETRY = corrections that
+CARRY the new instructions; QUESTIONS = post-failure questions and doubts,
+no instructions carried; BAIL = give-ups, topic changes, and withdrawals of
+the instructions.
 
 Fictional-but-believable fixtures throughout (the repo is public).
 """
@@ -109,6 +123,42 @@ async def test_idle_holds_on_chat_and_passing_mentions(
         pool=_HOLD_POOL,
         expected=ConversationState.IDLE,
         min_pass_rate=0.8,
+        family=_FAMILY,
+    )
+
+
+# Unprompted teaching — the user volunteers the routine WITH its steps, so the
+# machine goes straight to learn from idle, skipping the teach question (the
+# fire pool above is the paired guard: same intents, no steps → elicit).
+_UNPROMPTED_TEACH_POOL = [
+    "hey lemme teach you how to check the ferry: open harborferries.example/timetable "
+    "and remember the first morning departure",
+    "here's how i want you to track the tides — read the tide table page and note when "
+    "low tide is before 9",
+    "i'll show you how this works: go to the library's new-arrivals page and save any "
+    "new mystery titles",
+    "let me teach you my routine — open the bakery's site, find the daily special, write it down",
+    "this is how you do it: read the trailhead conditions page and remember whether the "
+    "pass is open",
+    "want to learn how i do this? open the vendor list page and note which stalls are new",
+    "ok teaching time — read harborseals.example/colony-count and save the number",
+    "here's the routine: check the ferry site, find the late sailing, remember if it's listed",
+    "i'll walk you through it: open the community pool page and note the summer hours",
+    "let me show you — read the birding club's sightings board and save any new species",
+]
+
+
+async def test_idle_to_learn_on_unprompted_teaching(
+    classifier_eval: ClassifierEval,
+) -> None:
+    """Teaching can arrive UNPROMPTED: a message carrying the routine AND its
+    steps goes straight to learn from idle, skipping the teach question."""
+    await classifier_eval(
+        case_id="idle-learn-unprompted",
+        state=ConversationState.IDLE,
+        pool=_UNPROMPTED_TEACH_POOL,
+        expected=ConversationState.LEARN,
+        min_pass_rate=None,
         family=_FAMILY,
     )
 
@@ -188,8 +238,8 @@ _CROSS_DOMAIN_POOL = [
     "keep a list of new murals going up around the city",
     "watch for new classes at the community center",
     "collect newly announced concerts happening near us",
-    "keep an eye out for new vendors joining the farmers market",
-    "find new coffee roasters popping up in town",
+    "every week, check which new vendors joined the farmers market",
+    "keep a running list of new coffee roasters opening in town",
 ]
 
 # Mixed-message boundary — chat preamble + a covered ask in ONE message: the
@@ -256,7 +306,7 @@ async def test_same_verb_different_domain_still_elicits(
         pool=_CROSS_DOMAIN_POOL,
         expected=ConversationState.ELICIT,
         seed_skills=_CROSS_DOMAIN_SKILLS,
-        min_pass_rate=None,
+        min_pass_rate=0.8,
         family=_FAMILY,
     )
 
@@ -329,11 +379,11 @@ _CLARIFYING_POOL = [
     "what would you need from me to do that?",
     "i'm not sure — what do you usually watch for people?",
     "does it matter which page i give you?",
-    "hang on, let me find the right link first",
+    "is this something you're able to do from your side?",
     "can you even open websites on your own?",
     "what format do you want the steps in?",
     "wait, would this be every day or just once?",
-    "let me think about what exactly i want you to look for",
+    "do you need the exact address or just the site name?",
 ]
 
 # Bail direction — the break-out edge: call-offs and topic changes.
@@ -411,6 +461,110 @@ async def test_parked_elicit_bails_out(classifier_eval: ClassifierEval) -> None:
         pool=_BAIL_POOL,
         expected=ConversationState.IDLE,
         penny_last_turn=_TEACH_QUESTION,
+        task_anchor=_FERRY_ASK,
+        min_pass_rate=0.8,
+        family=_FAMILY,
+    )
+
+
+# ── Beat 4: parked learn — re-entry after a failed demo round ─────────────────
+
+# The parked-learn context: the demo round failed (the honest failure report is
+# the assistant's last turn), the machine holds in learn, and the reply decides
+# retry vs re-explain vs bail.
+_FAILED_ROUND_REPORT = (
+    "I tried, but the timetable page wouldn't load, so I couldn't save anything. "
+    "Should I try again, or is there a different page I should read?"
+)
+
+# Retry direction — corrections and try-agains actionable NOW (the correction
+# IS new instruction: a fixed url, a different column, a narrower value).
+_RETRY_POOL = [
+    "try again — the page should load now",
+    "no, read the SECOND table on the page, not the first one",
+    "you saved the arrival time — i wanted the departure time, fix that",
+    "use harborferries.example/timetable-v2 instead, the old link is dead",
+    "almost — but remember the last sailing too, not just the first",
+    "run it once more, i think the site was just down",
+    "the times you grabbed are for weekdays — get the weekend ones",
+    "same steps, but save them under 'ferry times' instead",
+    "close! the departure column is the one on the left",
+    "redo it and this time keep only the morning sailings",
+]
+
+# Bail direction — the break-out edge from a failed round: give-ups and topic
+# changes; the task dies, the conversation moves on.
+_LEARN_BAIL_POOL = [
+    "you know what, forget it — this isn't working",
+    "let's give up on this one. how's your evening been?",
+    "eh, never mind the ferry thing. what's the weather tomorrow?",
+    "drop it for now, i'll set it up some other time",
+    "this is more trouble than it's worth, let's move on",
+    "abandon that — tell me a joke instead",
+    "let's shelve it. did anything happen in the news today?",
+    "no worries, i'll just check the ferry site myself from now on",
+    "scrap those steps — i'll write you better instructions in a minute",
+    "forget those instructions, they were wrong. i'll send new ones shortly",
+]
+
+
+async def test_parked_learn_retries_on_corrections(classifier_eval: ClassifierEval) -> None:
+    """Retry: a correction or try-again actionable now stays in learn — the
+    correction-loop invariant (a failed round holds its state)."""
+    await classifier_eval(
+        case_id="learn-retry-corrections",
+        state=ConversationState.LEARN,
+        pool=_RETRY_POOL,
+        expected=ConversationState.LEARN,
+        penny_last_turn=_FAILED_ROUND_REPORT,
+        task_anchor=_FERRY_ASK,
+        min_pass_rate=0.8,
+        family=_FAMILY,
+    )
+
+
+# Questions direction — post-failure questions and doubts about how: engaged,
+# but carrying no instructions, so the machine falls to idle (learn is two-way;
+# there is no path back to elicit once instructions have been given).
+_POST_FAILURE_QUESTION_POOL = [
+    "what went wrong exactly? which page did you open?",
+    "hm, what can you actually read then?",
+    "did the link work at all, or did nothing come up?",
+    "wait, which url did you try?",
+    "is there something about that page you can't handle?",
+    "what do you mean it wouldn't load — did you get an error?",
+    "so what part failed, the reading or the saving?",
+    "would a different page work better for you?",
+    "what kind of pages usually work?",
+    "huh, it loads fine for me — what did you see?",
+]
+
+
+async def test_parked_learn_questions_fall_to_idle(classifier_eval: ClassifierEval) -> None:
+    """Engaged questions still carry no instructions, so they fall to idle —
+    the two-way learn state has no path back to elicit."""
+    await classifier_eval(
+        case_id="learn-questions-idle",
+        state=ConversationState.LEARN,
+        pool=_POST_FAILURE_QUESTION_POOL,
+        expected=ConversationState.IDLE,
+        penny_last_turn=_FAILED_ROUND_REPORT,
+        task_anchor=_FERRY_ASK,
+        min_pass_rate=0.8,
+        family=_FAMILY,
+    )
+
+
+async def test_parked_learn_bails_out(classifier_eval: ClassifierEval) -> None:
+    """The break-out edge from a failed round: a give-up, a topic change, or a
+    withdrawal of the instructions routes to idle — parked learn is binary, so
+    anything that is not a corrected set of instructions is a bail."""
+    await classifier_eval(
+        case_id="learn-bail",
+        state=ConversationState.LEARN,
+        pool=_LEARN_BAIL_POOL,
+        expected=ConversationState.IDLE,
+        penny_last_turn=_FAILED_ROUND_REPORT,
         task_anchor=_FERRY_ASK,
         min_pass_rate=0.8,
         family=_FAMILY,

@@ -21,6 +21,13 @@ prose:
 
 - **The edge table is data** (:data:`OUT_EDGES`): every non-idle state that
   classifies carries the break-out edge → idle (topic changed / called off);
+  ``learn`` is TWO-WAY — the user either provides instructions to follow (stay
+  in learn) or the machine falls to idle: elicit exists to GET instructions, so
+  once they have been given there is no going back to it (code-owner ruling,
+  beat 4).  ``learn`` is reachable from ``idle`` directly — teaching can arrive
+  UNPROMPTED ("lemme teach you how to X: do A, B, C"), skipping the teach
+  question entirely; entering learn means ONE thing from every source, so the
+  condition text is identical on every edge that enters it;
   ``learn`` is unreachable from ``idle`` (steps can only arrive after an ask);
   ``apply`` has NO out-edges — its reset to idle is a post-turn structural
   fact, never a classifier call (there is no message to classify at end of
@@ -51,8 +58,6 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from penny.constants import PennyConstants
-from penny.database.skill_store import parameters_from_json
-from penny.database.skills import SkillParameter
 from penny.llm.similarity import embed_text
 from penny.tools.micro_context import SKILL_TAG, MicroContext, StateDraw, StateDrawOutcome
 
@@ -78,9 +83,10 @@ class ConversationState(StrEnum):
 # structural apply-narrowing in ``presented_edges``).  Order is render order.
 OUT_EDGES: dict[ConversationState, tuple[ConversationState, ...]] = {
     ConversationState.IDLE: (
-        ConversationState.IDLE,
         ConversationState.APPLY,
+        ConversationState.LEARN,
         ConversationState.ELICIT,
+        ConversationState.IDLE,
     ),
     ConversationState.ELICIT: (
         ConversationState.LEARN,
@@ -89,55 +95,86 @@ OUT_EDGES: dict[ConversationState, tuple[ConversationState, ...]] = {
     ),
     ConversationState.LEARN: (
         ConversationState.LEARN,
-        ConversationState.ELICIT,
         ConversationState.IDLE,
     ),
     ConversationState.APPLY: (),
 }
 
-# One model-facing meaning per EDGE — keyed (current, target), because the same
-# target state means something different depending on where the machine stands
-# (idle → idle is ordinary chat; learn → learn is a correction retry).  These
-# lines are the classifier's whole doctrine: tuned per-edge through the eval
-# beats, whole-render pinned by tests.
-EDGE_MEANINGS: dict[tuple[ConversationState, ConversationState], str] = {
-    (ConversationState.IDLE, ConversationState.IDLE): (
-        "ordinary conversation — chat, a passing mention, or a question or "
-        "one-off ask the assistant can answer right away; nothing ongoing is "
-        "being set up"
+# One CANONICAL definition per STATE — stable everywhere it renders (the
+# code-owner correction on beat 4: states have fixed semantics; only which
+# TRANSITIONS are available varies by current state, and that part is already
+# structural — OUT_EDGES + the union narrowing.  The prior per-edge meanings
+# conflated transition conditions with state identity and drifted per beat;
+# four stable strings replace nine drifting ones).  Load-bearing qualifiers
+# live in the definitions themselves: learn exists ONLY when the message
+# carries instructions; idle owns everything deferred.
+STATE_DEFINITIONS: dict[ConversationState, str] = {
+    ConversationState.IDLE: (
+        "ordinary conversation — chat, questions, passing mentions, or "
+        "anything put off for later; no task is being given or taught right now"
     ),
+    ConversationState.ELICIT: (
+        "the user wants a task done that no known skill covers, and the "
+        "assistant is asking to be taught the steps"
+    ),
+    ConversationState.LEARN: (
+        "the user's message gives instructions to follow — what to read, look "
+        "for, or remember; a plain command counts, and a message without "
+        "instructions is never learn"
+    ),
+    ConversationState.APPLY: (
+        "a known skill does what they are asking for — mere resemblance to a "
+        "skill is not coverage, and a needed input missing from their message "
+        "is gathered later — add a second line naming that skill: "
+        f"{SKILL_TAG} <its name, copied exactly from Known skills>"
+    ),
+}
+
+# The TRANSITION FUNCTION — the condition that selects each move, keyed
+# (current, target).  This is the half that legitimately varies by where the
+# machine stands, and rendering it AS conditions is what keeps the state
+# DEFINITIONS above stable: a state means one thing everywhere; what changes is
+# what moves you out of the state you are in.  Conditions come from #1706's
+# edge table (steps arrived / still clarifying / broke out; correcting /
+# working it out / called off) — the design, not the eval pools.
+#
+# IDLE is the DECLARED DEFAULT: it carries no condition of its own and always
+# renders last as "in all other cases", so a message meeting none of the real
+# conditions has an unambiguous home instead of being forced into the nearest
+# positive clause.
+TRANSITIONS: dict[tuple[ConversationState, ConversationState], str] = {
     (ConversationState.IDLE, ConversationState.APPLY): (
         "one of the known skills does what they are asking for — mere "
         "resemblance to a skill is not coverage, and a needed input missing "
-        "from their message (like a url) is gathered later, never a reason to "
-        f"refuse — add a second line naming that skill: {SKILL_TAG} <its "
-        "name, copied exactly from Known skills>"
+        "from their message is gathered later — add a second line naming that "
+        f"skill: {SKILL_TAG} <its name, copied exactly from Known skills>"
     ),
     (ConversationState.IDLE, ConversationState.ELICIT): (
-        "they are asking to set up an ongoing task or routine and no known "
-        "skill covers it — the assistant would need to be taught how"
+        "they are asking to set up an ongoing task or routine and no known skill covers it"
+    ),
+    (ConversationState.IDLE, ConversationState.LEARN): (
+        "the user's message is a set of instructions to follow for the task "
+        "being worked on — what to read, what to look for, what to remember, "
+        "including corrections to previous steps"
     ),
     (ConversationState.ELICIT, ConversationState.LEARN): (
-        "their message tells the assistant what to do — what to read, what to "
-        "look for, or what to remember; a plain instruction or command IS the "
-        "teaching, however brief"
+        "the user's message is a set of instructions to follow for the task "
+        "being worked on — what to read, what to look for, what to remember, "
+        "including corrections to previous steps"
     ),
     (ConversationState.ELICIT, ConversationState.ELICIT): (
-        "still working out the task — the assistant's question is not answered yet"
-    ),
-    (ConversationState.ELICIT, ConversationState.IDLE): (
-        "they changed the topic or called the task off"
+        "they are still working the task out with the assistant — a question "
+        "back, or a clarification about the task itself"
     ),
     (ConversationState.LEARN, ConversationState.LEARN): (
-        "they are correcting or retrying the task just attempted"
-    ),
-    (ConversationState.LEARN, ConversationState.ELICIT): (
-        "they are re-explaining from the start — the assistant needs the steps again"
-    ),
-    (ConversationState.LEARN, ConversationState.IDLE): (
-        "they changed the topic or called the task off"
+        "the user's message is a set of instructions to follow for the task "
+        "being worked on — what to read, what to look for, what to remember, "
+        "including corrections to previous steps"
     ),
 }
+
+# The default transition's rendered condition — IDLE's, everywhere.
+DEFAULT_TRANSITION = "in all other cases"
 
 # The conversation-slice section headers — fixed strings, whole-render pinned.
 # Markdown headers, not label lines: the parked, populated contexts this slice
@@ -148,8 +185,20 @@ _LAST_TURN_HEADER = "## The assistant's last message"
 _TASK_HEADER = "## The task being worked on"
 _SKILLS_HEADER = "## Known skills"
 _MESSAGE_HEADER = "## The user's newest message"
-_STATES_HEADER = "## States"
+_CURRENT_STATE_HEADER = "## Current state"
+_TRANSITIONS_HEADER = "## Transitions"
 _NONE_PLACEHOLDER = "(none)"
+
+
+class CandidateParameter(BaseModel):
+    """One declared input of a candidate skill — the light, cycle-free
+    projection of the store's ``SkillParameter`` (this module stays a leaf:
+    importing the database package from here re-enters it partially
+    initialized on a direct import, the documented validation/__init__ cycle
+    shape).  ``build_snapshot`` maps the store rows in."""
+
+    name: str
+    description: str | None = None
 
 
 class SkillCandidate(BaseModel):
@@ -163,7 +212,7 @@ class SkillCandidate(BaseModel):
 
     name: str
     description: str
-    parameters: list[SkillParameter] = []
+    parameters: list[CandidateParameter] = []
 
     def render(self) -> str:
         """The one-line candidate render: ``name — description`` plus a
@@ -268,7 +317,10 @@ def presented_edges(snapshot: MachineSnapshot) -> tuple[ConversationState, ...]:
 
 
 def render_classifier_content(snapshot: MachineSnapshot, message: str) -> str:
-    """The classifier's whole world, rendered as markdown SECTIONS: the scoped
+    """The classifier's whole world, rendered as markdown SECTIONS: WHERE the
+    machine stands and WHAT MOVES IT (the current state with its canonical
+    definition, then one line per available transition carrying the condition
+    that selects it — idle last, the declared default), over the scoped
     conversation slice
     (assistant's last turn, the parked task anchor when one exists, the known
     skills, the newest message), then the offered states with their per-edge
@@ -288,12 +340,22 @@ def render_classifier_content(snapshot: MachineSnapshot, message: str) -> str:
     else:
         sections.append(f"{_SKILLS_HEADER}\n{_NONE_PLACEHOLDER}")
     sections.append(f"{_MESSAGE_HEADER}\n{message}")
-    states = "\n".join(
-        f"- {target.value}: {EDGE_MEANINGS[(snapshot.state, target)]}"
+    current = f"{snapshot.state.value} — {STATE_DEFINITIONS[snapshot.state]}"
+    sections.append(f"{_CURRENT_STATE_HEADER}\n{current}")
+    transitions = "\n".join(
+        f"- {target.value} — {_transition_condition(snapshot.state, target)}"
         for target in presented_edges(snapshot)
     )
-    sections.append(f"{_STATES_HEADER}\n{states}")
+    sections.append(f"{_TRANSITIONS_HEADER}\n{transitions}")
     return "\n\n".join(sections)
+
+
+def _transition_condition(current: ConversationState, target: ConversationState) -> str:
+    """The condition selecting one move — IDLE is the declared default (it
+    carries no condition of its own), every other target names its own."""
+    if target is ConversationState.IDLE:
+        return DEFAULT_TRANSITION
+    return TRANSITIONS[(current, target)]
 
 
 def next_state(current: ConversationState, decision: StateDecision) -> ConversationState:
@@ -326,6 +388,10 @@ async def build_snapshot(
     A transient embed failure degrades to NO candidates — logged, and safe by
     construction: with no candidates the ``apply`` edge is structurally
     withheld (``presented_edges``), the perception twin of fail → stay."""
+    # Function-local import: the database package must never be imported at
+    # this module's import time (leaf discipline — see CandidateParameter).
+    from penny.database.skill_store import parameters_from_json
+
     candidates: list[SkillCandidate] = []
     vector = await embed_text(embedding_client, message)
     if vector is None:
@@ -335,7 +401,10 @@ async def build_snapshot(
             SkillCandidate(
                 name=skill.name,
                 description=skill.description,
-                parameters=parameters_from_json(skill.parameters),
+                parameters=[
+                    CandidateParameter(name=parameter.name, description=parameter.description)
+                    for parameter in parameters_from_json(skill.parameters)
+                ],
             )
             for skill in db.skills.resolve_by_meaning(vector, PennyConstants.FIND_MATCH_LIMIT)
         ]

@@ -23,6 +23,7 @@ import pytest
 from penny.constants import PennyConstants
 from penny.conversation_machine import (
     OUT_EDGES,
+    CandidateParameter,
     ConversationState,
     MachineSnapshot,
     SkillCandidate,
@@ -32,7 +33,7 @@ from penny.conversation_machine import (
     presented_edges,
     render_classifier_content,
 )
-from penny.database.skills import SkillDraft, SkillParameter, SkillStep
+from penny.database.skills import SkillDraft, SkillStep
 from penny.llm.models import LlmError, LlmMessage, LlmResponse
 from penny.tests.mocks.llm_patches import MockLlmClient
 from penny.tools.micro_context import (
@@ -51,7 +52,7 @@ _STEPS = "sure — read harborferries.example/timetable and remember the first m
 _SKILL = SkillCandidate(
     name="watch a listing price for changes",
     description="checks a page and records the current price",
-    parameters=[SkillParameter(name="url", description="the listing page to watch")],
+    parameters=[CandidateParameter(name="url", description="the listing page to watch")],
 )
 
 _IDLE_SNAPSHOT = MachineSnapshot(state=ConversationState.IDLE)
@@ -85,8 +86,15 @@ def test_edge_table_invariants():
     for state, edges in OUT_EDGES.items():
         if edges:
             assert ConversationState.IDLE in edges, f"{state} lacks the break-out edge"
-    assert ConversationState.LEARN not in OUT_EDGES[ConversationState.IDLE]
+    # Teaching can arrive unprompted, so learn IS reachable from idle.
+    assert ConversationState.LEARN in OUT_EDGES[ConversationState.IDLE]
     assert OUT_EDGES[ConversationState.APPLY] == ()
+    # learn is two-way: instructions (stay) or the idle default — elicit exists
+    # to GET instructions, so there is no path back to it once they are given.
+    assert OUT_EDGES[ConversationState.LEARN] == (
+        ConversationState.LEARN,
+        ConversationState.IDLE,
+    )
 
 
 def test_presented_edges_withholds_apply_without_candidates():
@@ -94,14 +102,16 @@ def test_presented_edges_withholds_apply_without_candidates():
     candidates — an empty registry never renders an apply option (the
     structural false-apply guard)."""
     assert presented_edges(_IDLE_SNAPSHOT) == (
-        ConversationState.IDLE,
+        ConversationState.LEARN,
         ConversationState.ELICIT,
+        ConversationState.IDLE,
     )
     with_skills = MachineSnapshot(state=ConversationState.IDLE, skill_candidates=[_SKILL])
     assert presented_edges(with_skills) == (
-        ConversationState.IDLE,
         ConversationState.APPLY,
+        ConversationState.LEARN,
         ConversationState.ELICIT,
+        ConversationState.IDLE,
     )
 
 
@@ -109,44 +119,47 @@ def test_presented_edges_withholds_apply_without_candidates():
 
 
 def test_system_prompt_whole_render():
-    """Whole-render literal of the dispatch contract: one tagged STATE: line,
-    the name copied exactly from the listed states, nothing else."""
+    """Whole-render literal of the dispatch contract: the frame + the
+    execution-context guard, the given-inputs list (current state and
+    transitions among them), the numbered decision steps (pick the transition
+    whose CONDITION is met, else the default), and the output contract."""
     assert STATE_CLASSIFIER_SYSTEM_PROMPT == (
         "You are a dispatch step for a conversation between a user and their "
-        "assistant. The assistant has real tools (reading pages, saving values), "
-        "and a separate context carries out whatever you decide — NEVER judge "
-        "whether an action is possible; your only job is the state.\n"
+        "assistant. The assistant has real tools (reading pages, saving values), and a "
+        "separate context carries out whatever you decide — NEVER judge whether an "
+        "action is possible; your only job is the state.\n"
         "\n"
         "You are given:\n"
         "- The assistant's last message\n"
         "- The task being worked on (when there is one)\n"
         "- Known skills — the assistant's existing routines ((none) when it has none)\n"
         "- The user's newest message\n"
-        "- States: the closed list to pick from, each with a one-line meaning\n"
+        "- Current state — where the conversation stands right now\n"
+        "- Transitions — the states you may move to, each with the condition that "
+        "selects it; the last one is the default\n"
         "\n"
         "Do this:\n"
         "1. In your reasoning, note what the user's newest message is doing in the "
         "conversation, judging only from what the messages say.\n"
-        "2. Pick the ONE listed state whose meaning fits the newest message.\n"
-        "3. Check whether the chosen state's meaning directs you to add a "
-        "SKILL: line.\n"
+        "2. Pick the ONE transition whose condition the newest message meets. When "
+        "none of the conditions is met, pick the default.\n"
+        "3. Check whether the chosen transition directs you to add a SKILL: line.\n"
         "\n"
         "Respond with exactly one line:\n"
         "STATE: <name>\n"
-        "The name must be one of the listed states, copied EXACTLY. When the chosen "
-        "state directs it, add exactly one more line — SKILL: <the skill's "
+        "The name must be one of the listed transitions, copied EXACTLY. When the "
+        "chosen transition directs it, add exactly one more line — SKILL: <the skill's "
         "name, copied exactly from Known skills> — and nothing more.\n"
-        "IMPORTANT: write nothing else — no preamble, no explanation, no restating "
-        "the messages."
+        "IMPORTANT: write nothing else — no preamble, no explanation, no restating the "
+        "messages."
     )
 
 
 def test_render_idle_slice_whole():
-    """The idle render, whole: markdown SECTIONS (structural boundaries the
-    populated contexts need), the (none) placeholders for the empty last turn
-    and registry — the elicit meaning's "no known skill covers it" must be a
-    READ, never an inference from a missing section — and the offered states
-    are idle + elicit only (apply withheld with no candidates)."""
+    """The idle render, whole: the slice sections, then WHERE the machine
+    stands (current state + its canonical definition) and WHAT MOVES IT (one
+    line per transition with its condition; idle last as the declared
+    default).  Apply is absent — no candidates."""
     assert render_classifier_content(_IDLE_SNAPSHOT, _ASK) == (
         "## The assistant's last message\n"
         "(none)\n"
@@ -157,24 +170,28 @@ def test_render_idle_slice_whole():
         "## The user's newest message\n"
         "hey can you keep an eye on the harbor ferry timetable for me?\n"
         "\n"
-        "## States\n"
-        "- idle: ordinary conversation — chat, a passing mention, or a question or "
-        "one-off ask the assistant can answer right away; nothing ongoing is "
-        "being set up\n"
-        "- elicit: they are asking to set up an ongoing task or routine and no known "
-        "skill covers it — the assistant would need to be taught how"
+        "## Current state\n"
+        "idle — ordinary conversation — chat, questions, passing mentions, or anything "
+        "put off for later; no task is being given or taught right now\n"
+        "\n"
+        "## Transitions\n"
+        "- learn — the user's message is a set of instructions to follow for the task "
+        "being worked on — what to read, what to look for, what to remember, including "
+        "corrections to previous steps\n"
+        "- elicit — they are asking to set up an ongoing task or routine and no known "
+        "skill covers it\n"
+        "- idle — in all other cases"
     )
 
 
 def test_render_parked_elicit_slice_whole():
-    """The parked-elicit render, whole: the assistant's teach question and the
-    instigating ask are both present as their own sections (a reply is only
-    classifiable against what it answers), and the union is the elicit
-    out-edges with their per-edge meanings — including the break-out edge."""
+    """The parked-elicit render, whole: teach question + instigating ask as
+    their own sections, elicit named as the current state, and its three
+    transitions carrying the conditions that select them."""
     assert render_classifier_content(_ELICIT_SNAPSHOT, _STEPS) == (
         "## The assistant's last message\n"
-        "I don't know how to do that yet — can you teach me? What should I read, "
-        "look for, and remember?\n"
+        "I don't know how to do that yet — can you teach me? What should I read, look "
+        "for, and remember?\n"
         "\n"
         "## The task being worked on\n"
         "hey can you keep an eye on the harbor ferry timetable for me?\n"
@@ -186,21 +203,65 @@ def test_render_parked_elicit_slice_whole():
         "sure — read harborferries.example/timetable and remember the first morning "
         "departure\n"
         "\n"
-        "## States\n"
-        "- learn: their message tells the assistant what to do — what to read, what to "
-        "look for, or what to remember; a plain instruction or command IS the "
-        "teaching, however brief\n"
-        "- elicit: still working out the task — the assistant's question is not "
-        "answered yet\n"
-        "- idle: they changed the topic or called the task off"
+        "## Current state\n"
+        "elicit — the user wants a task done that no known skill covers, and the "
+        "assistant is asking to be taught the steps\n"
+        "\n"
+        "## Transitions\n"
+        "- learn — the user's message is a set of instructions to follow for the task "
+        "being worked on — what to read, what to look for, what to remember, including "
+        "corrections to previous steps\n"
+        "- elicit — they are still working the task out with the assistant — a "
+        "question back, or a clarification about the task itself\n"
+        "- idle — in all other cases"
+    )
+
+
+def test_render_parked_learn_slice_whole():
+    """The parked-learn render, whole: learn is TWO-WAY — the union is learn
+    (the user provided instructions) and idle (everything else, the declared
+    default).  There is no path back to elicit: elicit exists to GET the
+    instructions, and they have been given."""
+    parked_learn = MachineSnapshot(
+        state=ConversationState.LEARN,
+        penny_last_turn=(
+            "I tried, but the timetable page wouldn't load, so I couldn't save "
+            "anything. Should I try again, or is there a different page I should read?"
+        ),
+        task_anchor=_ASK,
+    )
+    assert render_classifier_content(parked_learn, "try again — the page should load now") == (
+        "## The assistant's last message\n"
+        "I tried, but the timetable page wouldn't load, so I couldn't save anything. "
+        "Should I try again, or is there a different page I should read?\n"
+        "\n"
+        "## The task being worked on\n"
+        "hey can you keep an eye on the harbor ferry timetable for me?\n"
+        "\n"
+        "## Known skills\n"
+        "(none)\n"
+        "\n"
+        "## The user's newest message\n"
+        "try again — the page should load now\n"
+        "\n"
+        "## Current state\n"
+        "learn — the user's message gives instructions to follow — what to read, look "
+        "for, or remember; a plain command counts, and a message without instructions "
+        "is never learn\n"
+        "\n"
+        "## Transitions\n"
+        "- learn — the user's message is a set of instructions to follow for the task "
+        "being worked on — what to read, what to look for, what to remember, including "
+        "corrections to previous steps\n"
+        "- idle — in all other cases"
     )
 
 
 def test_render_idle_with_candidates_whole():
-    """The idle render with a ranked skill candidate, whole: the Known skills
-    section carries name, description, AND declared parameters (coverage is
-    reasoned from the full metadata) and the apply edge joins the union.  A
-    parameterless candidate renders without the needs tail, byte-identical."""
+    """The idle render with a ranked skill candidate, whole: full skill
+    metadata in Known skills, and the apply transition joining the list with
+    its coverage condition + the SKILL: directive.  A parameterless candidate
+    renders without the needs tail, byte-identical."""
     assert SkillCandidate(name="x", description="y").render() == "x — y"
     with_skills = MachineSnapshot(state=ConversationState.IDLE, skill_candidates=[_SKILL])
     assert render_classifier_content(with_skills, "what's the ferry price at today?") == (
@@ -208,23 +269,27 @@ def test_render_idle_with_candidates_whole():
         "(none)\n"
         "\n"
         "## Known skills\n"
-        "- watch a listing price for changes — checks a page and records the "
-        "current price (needs: url — the listing page to watch)\n"
+        "- watch a listing price for changes — checks a page and records the current "
+        "price (needs: url — the listing page to watch)\n"
         "\n"
         "## The user's newest message\n"
         "what's the ferry price at today?\n"
         "\n"
-        "## States\n"
-        "- idle: ordinary conversation — chat, a passing mention, or a question or "
-        "one-off ask the assistant can answer right away; nothing ongoing is "
-        "being set up\n"
-        "- apply: one of the known skills does what they are asking for — mere "
-        "resemblance to a skill is not coverage, and a needed input missing "
-        "from their message (like a url) is gathered later, never a reason to "
-        "refuse — add a second line naming that skill: SKILL: <its "
+        "## Current state\n"
+        "idle — ordinary conversation — chat, questions, passing mentions, or anything "
+        "put off for later; no task is being given or taught right now\n"
+        "\n"
+        "## Transitions\n"
+        "- apply — one of the known skills does what they are asking for — mere "
+        "resemblance to a skill is not coverage, and a needed input missing from their "
+        "message is gathered later — add a second line naming that skill: SKILL: <its "
         "name, copied exactly from Known skills>\n"
-        "- elicit: they are asking to set up an ongoing task or routine and no known "
-        "skill covers it — the assistant would need to be taught how"
+        "- learn — the user's message is a set of instructions to follow for the task "
+        "being worked on — what to read, what to look for, what to remember, including "
+        "corrections to previous steps\n"
+        "- elicit — they are asking to set up an ongoing task or routine and no known "
+        "skill covers it\n"
+        "- idle — in all other cases"
     )
 
 
@@ -255,9 +320,10 @@ async def test_classify_decides_with_attribution_and_exact_model_input():
 async def test_classify_out_of_union_draw_is_rerolled_then_stays():
     """A drawn state OUTSIDE the offered union is a contract violation exactly
     like an untagged draw: one reroll of the unchanged context, then an honest
-    INVALID the machine holds its state on — learn is not an idle out-edge, so
-    a flaky draw can never conjure a teach round from ordinary chat."""
-    model = _responds("STATE: learn")
+    INVALID the machine holds its state on — apply is WITHHELD from a
+    candidate-less idle snapshot, so a flaky draw can never conjure an apply
+    against an empty registry."""
+    model = _responds("STATE: apply")
     decision = await _classifier(model).classify(_IDLE_SNAPSHOT, _ASK)
     assert decision.outcome == StateDrawOutcome.INVALID
     assert decision.state is None
