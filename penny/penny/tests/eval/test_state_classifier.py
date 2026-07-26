@@ -1,4 +1,4 @@
-"""Per-edge conversation-state classifier contracts (#1706, beats 1–4): the
+"""Per-edge conversation-state classifier contracts (#1706, beats 1–5): the
 idle out-edges, every direction, from the cold-start shape through a populated
 skill registry.
 
@@ -49,6 +49,17 @@ set of instructions (→ learn), or a bail (→ idle).  RETRY = corrections that
 CARRY the new instructions; QUESTIONS = post-failure questions and doubts,
 no instructions carried; BAIL = give-ups, topic changes, and withdrawals of
 the instructions.
+
+**Beat 5 (the parked machine — request's out-edges)**: idle grows a fifth
+edge, and apply splits with it.  A covered ask whose message CARRIES what the
+skill needs applies; a covered ask MISSING it goes to request instead (the
+paired split — same intents, the url present or absent is the only difference),
+where the assistant names the skill and asks.  Parked in request
+(``penny_last_turn`` = that question, anchor = the instigating ask), the reply
+resolves it: DETAILS ARRIVE = the page, or a confirmation (→ apply, skill still
+bound); WRONG SKILL = the proposal rejected but the task still wanted (→ elicit);
+BAIL = call-offs (→ idle).  Both apply and request are SKILL-GATED, so each also
+binds its skill by name.
 
 Fictional-but-believable fixtures throughout (the repo is public).
 """
@@ -182,17 +193,36 @@ _SEEDED_SKILLS = [
 # Apply direction — every ask is covered by the price-watch skill; the specials
 # skill rides along as the in-context distractor (wrong-skill selection is a
 # scored miss on the "named the covering skill" check).
+# Apply direction — covered AND fully bound: every ask names the page the
+# price-watch skill needs, so the machine can enact immediately.  Asks that
+# leave the url out are the request pool below (the paired split).
 _APPLY_POOL = [
     "can you watch the price on ridgelinefoxes.example/den-camera-kit?",
-    "keep an eye on the price of the harbor kayak rental page for me",
+    "keep an eye on the price at harborkayak.example/rentals/sea-touring",
     "track what the vintage synth on brasscat.example/listings/modular-iii is going for",
     "watch tidepool-optics.example/spotting-scope and tell me when the price moves",
+    "keep tabs on the ferry season pass price at harborferries.example/passes",
+    "monitor ridgelinefoxes.example/den-camera-kit — i want to know if it gets cheaper",
+    "follow the price on that surfboard listing at driftline.example/boards/7-2",
+    "watch campsite fees at pinehollow.example/rates and note the current one",
+    "could you track the espresso grinder price at beanhouse.example/grinders/ek43?",
+    "keep watching what brasscat.example/listings/pinball-1979 is listed at",
+]
+
+# Request-details direction — the skill plainly fits, but the page it needs is
+# NOT in the message: the machine names the skill and asks, never refuses and
+# never guesses a url.
+_MISSING_INPUT_POOL = [
+    "keep an eye on the price of the harbor kayak rental page for me",
     "can you keep tabs on the price of the ferry season pass?",
     "monitor the den camera kit listing — i want to know if it gets cheaper",
-    "follow the price on that surfboard listing at driftline.example/boards/7-2",
     "hey, watch the campsite fee page and note the current rate",
-    "could you track the price of the espresso grinder on beanhouse.example?",
+    "could you track the price of the espresso grinder at that roaster?",
     "keep watching what the old pinball machine is listed at",
+    "watch the price on that spotting scope i was looking at",
+    "track the surfboard listing price for me",
+    "can you follow the vintage synth's price?",
+    "keep an eye on what the sea-touring kayak goes for",
 ]
 
 # Uncovered direction — routine setups CLEARLY outside both seeded skills
@@ -244,20 +274,20 @@ _CROSS_DOMAIN_POOL = [
 
 # Mixed-message boundary — chat preamble + a covered ask in ONE message: the
 # routine half wins (apply, with the skill bound); the chat half never
-# suppresses it.  Every ask names the price EXPLICITLY (a contract case tests
-# the transition on clear inputs; paraphrase tolerance is the advisory
-# boundary case's business).
+# suppresses it.  Every ask names the price EXPLICITLY and carries the page the
+# skill needs, so the ONE variable under test is the chat preamble — boundness
+# is the fire/request split's business, not this case's.
 _MIXED_POOL = [
-    "morning! oh and can you watch the price on the den camera kit listing?",
-    "bakery ran out of croissants again lol — anyway, watch the espresso grinder price for me?",
-    "that hike was gorgeous. also, track the spotting scope's price for me?",
-    "thanks, super helpful! one more thing — watch the kayak rental price?",
-    "my sister's visiting next weekend. btw can you keep tabs on the surfboard listing price?",
-    "what a day. anyway — monitor the modular synth listing price for me, ok?",
-    "the ferry was packed this morning. oh — watch the season pass price too?",
-    "haha fair enough. hey, can you track the pinball machine's asking price?",
-    "good morning! quick one: keep watching the den camera kit price?",
-    "nice, that worked. also can you watch the price on the campsite booking page?",
+    "morning! oh and can you watch the price on ridgelinefoxes.example/den-camera-kit?",
+    "croissants again, ugh — anyway, watch beanhouse.example/grinders/ek43's price?",
+    "that hike was gorgeous. also, track tidepool-optics.example/spotting-scope's price?",
+    "thanks! one more thing — watch harborkayak.example/rentals/sea-touring's price?",
+    "sister visits next weekend. btw keep tabs on driftline.example/boards/7-2's price?",
+    "what a day. anyway — monitor the price at brasscat.example/listings/modular-iii, ok?",
+    "the ferry was packed today. oh — watch harborferries.example/passes' price too?",
+    "haha fair enough. hey, track the price at brasscat.example/listings/pinball-1979?",
+    "good morning! quick one: watch the price at ridgelinefoxes.example/den-camera-kit?",
+    "nice, that worked. also can you watch the price on pinehollow.example/rates?",
 ]
 
 
@@ -274,6 +304,23 @@ async def test_idle_to_apply_fires_and_binds_the_covering_skill(
         expected_skill=_PRICE_SKILL,
         seed_skills=_SEEDED_SKILLS,
         min_pass_rate=0.8,
+        family=_FAMILY,
+    )
+
+
+async def test_idle_to_request_details_when_inputs_missing(
+    classifier_eval: ClassifierEval,
+) -> None:
+    """Covered but unbound: the skill fits and the page it needs is absent, so
+    the machine names the skill and asks — never refusing, never guessing."""
+    await classifier_eval(
+        case_id="idle-request",
+        state=ConversationState.IDLE,
+        pool=_MISSING_INPUT_POOL,
+        expected=ConversationState.REQUEST,
+        expected_skill=_PRICE_SKILL,
+        seed_skills=_SEEDED_SKILLS,
+        min_pass_rate=None,
         family=_FAMILY,
     )
 
@@ -340,6 +387,104 @@ async def test_mixed_chat_plus_covered_ask_applies(
         expected_skill=_PRICE_SKILL,
         seed_skills=_SEEDED_SKILLS,
         min_pass_rate=0.8,
+        family=_FAMILY,
+    )
+
+
+# ── Beat 5: the parked machine — request's out-edges ─────────────────────────
+
+# The parked context: the assistant named the skill and asked for what it needs.
+_REQUEST_QUESTION = "Sounds like my watch-a-listing-price skill — which page should I watch?"
+_KAYAK_ASK = "keep an eye on the price of the harbor kayak rental page for me"
+
+# Details arrive (a url, or a plain confirmation) → apply, skill still bound.
+_REQUEST_APPLY_POOL = [
+    "harborkayak.example/rentals/sea-touring",
+    "here you go: harborkayak.example/rentals/sea-touring",
+    "yeah that's the one — harborkayak.example/rentals/sea-touring",
+    "the page is harborkayak.example/rentals/sea-touring",
+    "use harborkayak.example/rentals/sea-touring",
+    "yes please, and the page is harborkayak.example/rentals",
+    "that skill's right — watch harborkayak.example/rentals",
+    "correct. the listing lives at harborkayak.example/rentals/sea-touring",
+    "sure, go ahead — harborkayak.example/rentals/sea-touring",
+    "yep. harborkayak.example/rentals/sea-touring is the page",
+]
+
+# Wrong skill, task still wanted → elicit (teach me the right routine).
+_WRONG_SKILL_POOL = [
+    "no, that's not what i meant — i want something different",
+    "that skill isn't right for this, it's a different kind of thing",
+    "not that one. what i want is something else entirely",
+    "nope, wrong skill — this isn't about prices",
+    "that's not it. i need something you don't know how to do yet",
+    "no, i don't want the price watcher for this",
+    "that skill doesn't fit what i'm after",
+    "not quite — this is a different job than that one",
+    "no, that's the wrong routine for what i need",
+    "that isn't what i had in mind, i want another thing done",
+]
+
+# Bail from the parked question → idle.
+_REQUEST_BAIL_POOL = [
+    "actually never mind, forget the whole thing",
+    "eh, drop it — what's the weather tomorrow?",
+    "let's skip it for now",
+    "you know what, don't bother",
+    "changing topics — tell me a joke instead",
+    "no worries, i'll just check it myself",
+    "leave it. how was your night?",
+    "not important, let's move on",
+    "cancel that, i'd rather plan dinner",
+    "forget it — did anything happen in the news today?",
+]
+
+
+async def test_parked_details_arrive_applies(classifier_eval: ClassifierEval) -> None:
+    """Details arrive: a url (or a plain confirmation) moves the parked machine
+    to apply with the same skill still bound — the negotiation completes."""
+    await classifier_eval(
+        case_id="request-apply",
+        state=ConversationState.REQUEST,
+        pool=_REQUEST_APPLY_POOL,
+        expected=ConversationState.APPLY,
+        expected_skill=_PRICE_SKILL,
+        penny_last_turn=_REQUEST_QUESTION,
+        task_anchor=_KAYAK_ASK,
+        seed_skills=_SEEDED_SKILLS,
+        min_pass_rate=None,
+        family=_FAMILY,
+    )
+
+
+async def test_parked_details_wrong_skill_elicits(classifier_eval: ClassifierEval) -> None:
+    """Wrong skill, task still wanted: the machine returns to elicit — the
+    proposal was rejected, so the routine has to be taught."""
+    await classifier_eval(
+        case_id="request-elicit",
+        state=ConversationState.REQUEST,
+        pool=_WRONG_SKILL_POOL,
+        expected=ConversationState.ELICIT,
+        penny_last_turn=_REQUEST_QUESTION,
+        task_anchor=_KAYAK_ASK,
+        seed_skills=_SEEDED_SKILLS,
+        min_pass_rate=None,
+        family=_FAMILY,
+    )
+
+
+async def test_parked_details_bails(classifier_eval: ClassifierEval) -> None:
+    """The break-out edge: a call-off or topic change drops the negotiation
+    back to idle."""
+    await classifier_eval(
+        case_id="request-bail",
+        state=ConversationState.REQUEST,
+        pool=_REQUEST_BAIL_POOL,
+        expected=ConversationState.IDLE,
+        penny_last_turn=_REQUEST_QUESTION,
+        task_anchor=_KAYAK_ASK,
+        seed_skills=_SEEDED_SKILLS,
+        min_pass_rate=None,
         family=_FAMILY,
     )
 
