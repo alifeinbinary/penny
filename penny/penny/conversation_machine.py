@@ -14,7 +14,9 @@ member union per call, never the global set.
 The v1 states: **idle** (ordinary conversation) · **elicit** (a routine was
 asked for that no skill covers — Penny asks to be taught) · **learn** (the
 steps arrived — do them now, once; the run's framework tail auto-extracts the
-skill) · **apply** (the request matches a known skill — enact its recipe).
+skill) · **request** (a skill covers the ask but something it needs is missing
+— Penny names the skill and asks for it) · **apply** (the request matches a
+known skill and everything it needs was supplied — enact its recipe).
 
 Structural invariants, held here as data and pure functions, never as prompt
 prose:
@@ -28,7 +30,6 @@ prose:
   UNPROMPTED ("lemme teach you how to X: do A, B, C"), skipping the teach
   question entirely; entering learn means ONE thing from every source, so the
   condition text is identical on every edge that enters it;
-  ``learn`` is unreachable from ``idle`` (steps can only arrive after an ask);
   ``apply`` has NO out-edges — its reset to idle is a post-turn structural
   fact, never a classifier call (there is no message to classify at end of
   run, and completion self-report is the one judgment the machine never asks
@@ -42,11 +43,16 @@ prose:
   no ranked skill candidates in the snapshot, the ``apply`` edge is withheld
   structurally — an empty registry never invites a false apply.
 
-v1 scope (the classifier machinery alone): the snapshot is constructed by the
-caller — the eval harness today, chat wiring later — and nothing here persists
-state or touches the DB.  The classifier call itself is ledger-visible (its
-own ``agent_name``/``prompt_type`` promptlog rows), so every decision is
-attributable and replayable from production history.
+Scope: the classifier machinery plus its DURABLE half.  :class:`ConversationMachine`
+holds the state across turns (``db.machine`` — the ``conversation_machine`` row)
+and records every move in the ``state_transition`` ledger, so a parked state is
+READ by the next message's classification instead of evaporating with the turn
+that set it.  The classifier call is itself ledger-visible (its own
+``agent_name``/``prompt_type`` promptlog rows), so a transition row joins to the
+draw that produced it and per-edge accuracy is scorable over production history.
+Still unwired to chat: no per-state chat prompt reads this yet, and the pure
+pieces (:func:`presented_edges`, :func:`render_classifier_content`,
+:func:`next_state`) stay callable without a database for the eval harness.
 """
 
 from __future__ import annotations
@@ -57,7 +63,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from penny.constants import PennyConstants
+from penny.constants import PennyConstants, TransitionCause
 from penny.llm.similarity import embed_text
 from penny.tools.micro_context import SKILL_TAG, MicroContext, StateDraw, StateDrawOutcome
 
@@ -448,3 +454,144 @@ async def build_snapshot(
         task_anchor=task_anchor,
         skill_candidates=candidates,
     )
+
+
+class ConversationMachine:
+    """The machine itself: state held across turns, moved by classification or
+    structure, every move recorded — as ONE write.
+
+    :class:`StateClassifier` decides one transition and returns it; this is what
+    makes those decisions a machine.  It owns the three things a decision alone
+    cannot: reading where the machine stands (the newest logged move), the
+    ANCHOR lifecycle (set on entry off idle, carried through the parked round,
+    cleared on break-out — so a reply arriving three messages later is still
+    classified against the ask it answers), and the structural moves no model is
+    asked to make (the post-apply reset).
+
+    There is no materialized state to keep in step with the log: appending the
+    move IS moving the machine (``db.machine``), so a failed write leaves the
+    machine exactly where it was rather than moving it silently off-ledger.
+
+    Not wired to chat yet — the caller supplies the message and its id.
+    """
+
+    def __init__(
+        self,
+        db: Database,
+        embedding_client: LlmClient,
+        classifier: StateClassifier,
+    ) -> None:
+        self._db = db
+        self._embedding_client = embedding_client
+        self._classifier = classifier
+
+    async def advance(
+        self,
+        message: str,
+        *,
+        message_id: int | None = None,
+        penny_last_turn: str | None = None,
+        run_id: str | None = None,
+        run_target: str | None = None,
+    ) -> StateDecision:
+        """One incoming message, start to finish: settle any structural move
+        first, classify from where that leaves the machine, then record the
+        result (which is what applies it).  Returns the decision the caller
+        acts on."""
+        state = self._settle_structural(message_id=message_id)
+        snapshot = await self._snapshot(state, message, penny_last_turn=penny_last_turn)
+        decision = await self._classifier.classify(snapshot, message, run_target=run_target)
+        self._record_decision(state, decision, message_id=message_id, run_id=run_id)
+        return decision
+
+    def state(self) -> ConversationState:
+        """Where the machine stands — the newest move's destination.  No history
+        at all is the cold start, and idle is what that means."""
+        latest = self._db.machine.latest_transition()
+        return ConversationState(latest.to_state) if latest else ConversationState.IDLE
+
+    def _settle_structural(self, *, message_id: int | None) -> ConversationState:
+        """Apply any move the edge table makes WITHOUT a model: a state with no
+        out-edges resets to idle (``apply`` — completion is a structural fact,
+        never a self-report the machine asks the model for).  Appended like any
+        other move, so the log shows the reset that preceded the draw rather
+        than an unexplained jump."""
+        state = self.state()
+        if OUT_EDGES[state]:
+            return state
+        self._db.machine.record_transition(
+            from_state=state.value,
+            to_state=ConversationState.IDLE.value,
+            cause=TransitionCause.STRUCTURAL,
+            anchor_message_id=None,
+            message_id=message_id,
+        )
+        return ConversationState.IDLE
+
+    async def _snapshot(
+        self, state: ConversationState, message: str, *, penny_last_turn: str | None
+    ) -> MachineSnapshot:
+        """The classifier's input, with the anchor resolved from the machine's
+        own log — the parked ask is READ from the conversation it points at,
+        never a copy this layer keeps."""
+        return await build_snapshot(
+            self._db,
+            self._embedding_client,
+            state=state,
+            message=message,
+            penny_last_turn=penny_last_turn,
+            task_anchor=self._anchor_text(),
+        )
+
+    def _anchor_text(self) -> str | None:
+        """The instigating ask's text, or ``None`` when the machine is unparked
+        (or its anchor message has since been deleted — an absent anchor is the
+        idle shape, never an error)."""
+        anchor_id = self._anchor_message_id()
+        if anchor_id is None:
+            return None
+        message = self._db.messages.get_by_id(anchor_id)
+        return message.content if message is not None else None
+
+    def _anchor_message_id(self) -> int | None:
+        """The anchor in effect right now — carried on the newest move."""
+        latest = self._db.machine.latest_transition()
+        return latest.anchor_message_id if latest else None
+
+    def _record_decision(
+        self,
+        current: ConversationState,
+        decision: StateDecision,
+        *,
+        message_id: int | None,
+        run_id: str | None,
+    ) -> None:
+        """Append the move ``next_state`` allows — the write that applies it.
+
+        EVERY draw is appended, including one that moves nothing: without the
+        held draws the log reports a perfect classifier by construction, and
+        per-edge accuracy is exactly what it exists to make scorable."""
+        target = next_state(current, decision)
+        self._db.machine.record_transition(
+            from_state=current.value,
+            to_state=target.value,
+            cause=TransitionCause.CLASSIFIER,
+            anchor_message_id=self._next_anchor(current, target, message_id),
+            outcome=decision.outcome.value,
+            message_id=message_id,
+            run_id=run_id,
+            skill_name=decision.skill,
+        )
+
+    def _next_anchor(
+        self, current: ConversationState, target: ConversationState, message_id: int | None
+    ) -> int | None:
+        """The anchor lifecycle in one place: idle clears it, entering a parked
+        state FROM idle sets it to the instigating message, and a machine
+        already parked KEEPS the ask it was parked on — the anchor is what
+        started the round, not the newest thing said during it."""
+        if target is ConversationState.IDLE:
+            return None
+        if current is ConversationState.IDLE:
+            return message_id
+        return self._anchor_message_id()
