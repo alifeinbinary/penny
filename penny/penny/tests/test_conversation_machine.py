@@ -23,6 +23,7 @@ eval suite's job (beat 1 onward), not this file's.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -31,6 +32,7 @@ import pytest
 from penny.constants import PennyConstants, TransitionCause
 from penny.conversation_machine import (
     OUT_EDGES,
+    STATE_INSTRUCTIONS,
     CandidateParameter,
     ConversationMachine,
     ConversationState,
@@ -38,12 +40,14 @@ from penny.conversation_machine import (
     SkillCandidate,
     StateClassifier,
     build_snapshot,
+    conversation_prompt,
     next_state,
     presented_edges,
     render_classifier_content,
 )
 from penny.database.skills import SkillDraft, SkillStep
 from penny.llm.models import LlmMessage, LlmResponse
+from penny.prompts import Prompt
 from penny.tests.mocks.llm_patches import MockLlmClient
 from penny.tools.micro_context import (
     STATE_CLASSIFIER_SYSTEM_PROMPT,
@@ -634,3 +638,83 @@ async def test_state_is_a_fold_over_the_log_with_no_materialized_twin(db):
         ConversationState.ELICIT.value,
         anchor_id,
     )
+
+
+# ── Per-state chat instructions (#1706) ─────────────────────────────────────
+
+
+def test_every_state_has_an_instruction_and_there_is_no_fallback():
+    """TOTAL by construction: the machine always has a state, so a turn always
+    has exactly one instruction.  A default would mean the state failed to
+    determine the prompt — the one thing the machine exists to fix — so a
+    missing entry must RAISE rather than quietly compose someone else's."""
+    assert set(STATE_INSTRUCTIONS) == set(ConversationState)
+    for state in ConversationState:
+        prompt = conversation_prompt(state)
+        assert prompt.startswith(Prompt.CONVERSATION_HEAD)
+        assert prompt.endswith(Prompt.CONVERSATION_TAIL)
+        assert STATE_INSTRUCTIONS[state] in prompt
+
+
+def test_each_state_carries_only_its_own_instruction():
+    """No union: a state's prompt contains ITS instruction and no other's.  This
+    is what the machine buys — #1687's four-case block existed only so the model
+    could work out which case applied, and that is answered in Python now."""
+    for state in ConversationState:
+        prompt = conversation_prompt(state)
+        for other, instruction in STATE_INSTRUCTIONS.items():
+            if other is not state:
+                assert instruction not in prompt, f"{state} leaked {other}'s instruction"
+
+
+def test_no_instruction_names_the_machine():
+    """Nothing renders the machine to chat — no state name, no transitions, no
+    hint a classifier ran.  Where the conversation stands is already decided;
+    what the turn needs is what to do."""
+    machine_words = ("idle", "elicit", "learn", "apply", "request-details", "transition", "classif")
+    for state, instruction in STATE_INSTRUCTIONS.items():
+        for word in machine_words:
+            assert word not in instruction.lower(), f"{state} instruction names '{word}'"
+
+
+def test_the_un_stated_prompt_is_idle():
+    """With no machine wired (or a classifier failure) the chat agent falls back
+    to ``CONVERSATION_PROMPT`` — which IS idle's composition, not a second
+    definition that could drift from it."""
+    assert conversation_prompt(ConversationState.IDLE) == Prompt.CONVERSATION_PROMPT
+
+
+def test_elicit_instruction_whole_render():
+    """The whole instruction, verbatim — pinned so an edit is a visible diff.
+
+    Generically and minimally sufficient to enact the state: no task shape, no
+    example phrasing, and no guard written against a particular failed sample.
+    (Both of those crept in from #1687 and had to come back out — one of them
+    quoted an eval fixture's own words, which is the contamination the
+    definitions-are-product-semantics rule exists to catch.)"""
+    assert Prompt.ELICIT_INSTRUCTION == (
+        "The user has asked for a task you have no skill for. Your job this turn "
+        "is to get the instructions from them.\n\n"
+        "In ONE message, ask them to walk you through doing it once: what to "
+        "read, what to do with it, and what to remember afterwards. Ask in the "
+        "terms they used — describing the task is theirs, working out how to "
+        "carry it out is yours. Never ask them to define keywords, terms, "
+        "matching rules, css or selectors, or anything about how a page is "
+        "built.\n\n"
+        "Don't attempt the task, don't do part of it, and don't record anything. "
+        "Nothing exists yet, so don't say or imply that it does.\n\n"
+    )
+
+
+def test_no_instruction_carries_a_task_shape_or_an_example_phrasing():
+    """An instruction describes the STATE, never a kind of task or a form of
+    words a user might use.  Both leaked in from #1687 — an example filter quoted
+    verbatim from an eval fixture, and a numbered template mirroring that
+    fixture's teach turn — which is a prompt describing its own test pool."""
+    for state, instruction in STATE_INSTRUCTIONS.items():
+        # A quoted phrase (an apostrophe opening after whitespace) is an example
+        # of what a user might say — contractions don't match, quoted specimens do.
+        assert not re.search(r"(?<=\s)'[^']+'", instruction), f"{state} quotes an example phrasing"
+        assert not re.search(r"\d\.\s+(go to|pull out|visit)", instruction), (
+            f"{state} models a task-shaped template"
+        )

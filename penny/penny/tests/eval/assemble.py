@@ -83,7 +83,12 @@ def assemble_run_comment(report_dir: Path) -> str:
     sections = [render_run_header(manifest, artifacts, baseline)]
     sections += [_case_section(report_dir, manifest, artifact, multi) for artifact in artifacts]
     sections.append(render_footer(report_dir))
-    return SECTION_SEPARATOR.join(sections) + "\n"
+    # A case's samples each carry a ~6K system prompt that is mostly the same text,
+    # and restating it per sample made one 4-case run 525K against a 64K comment cap
+    # (#1763).  Lift each case's shared block under its heading; samples keep only
+    # what is genuinely theirs.  Nothing is dropped — every prompt stays
+    # reconstructable, verbatim, one click from where it applies.
+    return report.hoist_shared_prompt_blocks(SECTION_SEPARATOR.join(sections)) + "\n"
 
 
 # ── Artifact loading (the manifest is required; results/transcripts tolerate absence) ──

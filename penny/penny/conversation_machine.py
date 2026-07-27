@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from penny.constants import TransitionCause
+from penny.prompts import Prompt
 from penny.tools.micro_context import SKILL_TAG, MicroContext, StateDraw, StateDrawOutcome
 
 if TYPE_CHECKING:
@@ -448,6 +449,32 @@ def build_snapshot(
             for skill in db.skills.list_all()
         ],
     )
+
+
+# The ONE instruction per state the chat prompt carries.  TOTAL over the state
+# set by construction (pinned by a test): the machine always has a state, so a
+# turn always has exactly one instruction and there is no default to fall back
+# on.  A fallback would mean the state failed to determine the prompt, which is
+# the whole thing the machine exists to fix.
+STATE_INSTRUCTIONS: dict[ConversationState, str] = {
+    ConversationState.IDLE: Prompt.IDLE_INSTRUCTION,
+    ConversationState.ELICIT: Prompt.ELICIT_INSTRUCTION,
+    ConversationState.LEARN: Prompt.LEARN_INSTRUCTION,
+    ConversationState.REQUEST: Prompt.REQUEST_INSTRUCTION,
+    ConversationState.APPLY: Prompt.APPLY_INSTRUCTION,
+}
+
+
+def conversation_prompt(state: ConversationState) -> str:
+    """The chat system prompt for a state: the invariant physics core with THIS
+    state's instruction between head and tail.
+
+    The state's name never renders, and neither does any other state's
+    instruction — by the time chat reads this the state is already decided, so
+    what it needs is what to do, not where it is.  Indexes ``STATE_INSTRUCTIONS``
+    directly: a missing state is a programming error and should raise, never
+    quietly compose some other state's prompt."""
+    return Prompt.CONVERSATION_HEAD + STATE_INSTRUCTIONS[state] + Prompt.CONVERSATION_TAIL
 
 
 class ConversationMachine:

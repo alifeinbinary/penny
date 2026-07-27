@@ -341,3 +341,95 @@ def test_split_sample_blocks_separates_mixed_forms() -> None:
     transcript = f"{folded}\n\n{heading}\n\n"
     assert report.split_sample_blocks(transcript) == [folded, heading]
     assert report.split_sample_blocks("") == []
+
+
+# ── Hoisting a case's shared system-prompt block (#1763) ────────────────────
+
+
+def _prompt_block(context: str, text: str) -> str:
+    return report.SystemPrompt(context=context, text=text).render()
+
+
+_SHARED = "\n".join(f"shared line {n}" for n in range(40))
+
+
+def _case(name: str, *blocks: str) -> str:
+    return f"### `{name}` — fam\n\n" + "\n\nsample\n\n".join(blocks)
+
+
+def test_the_shared_text_is_hoisted_and_only_the_delta_stays():
+    """A case's chat prompts differ at BOTH ends — a timestamp opens them, the
+    live self-state closes them — so the shared part is a middle, not a prefix.
+    It renders once under the case heading; each sample keeps only the lines that
+    are genuinely its own, with a marker standing where the shared text sits, so
+    the whole prompt is still reconstructable and the DIFFERENCE is what you
+    read (median ~120 bytes on a real run, against a 6.4K wall before)."""
+    a = _prompt_block("chat", f"time A\n{_SHARED}\nstate A")
+    b = _prompt_block("chat", f"time B\n{_SHARED}\nstate B")
+    hoisted = report.hoist_shared_prompt_blocks(_case("beat0", a, b))
+
+    assert report.SHARED_PROMPT_HEADING in hoisted
+    assert hoisted.count(_SHARED) == 1, "the shared text renders exactly once"
+    assert hoisted.count(report.SHARED_PROMPT_MARKER) == 2, "each sample points at it"
+    for unique in ("time A", "time B", "state A", "state B"):
+        assert unique in hoisted, f"{unique} — a sample's own text is never dropped"
+
+
+def test_an_identical_prompt_leaves_a_pure_reference():
+    """When the shared block IS the whole prompt — a classifier run, byte-identical
+    every sample — the remainder is empty and the row is just the marker.  Same
+    mechanism, no special case."""
+    block = _prompt_block("state-classifier", _SHARED)
+    hoisted = report.hoist_shared_prompt_blocks(_case("beat0", block, block, block))
+    assert hoisted.count(_SHARED) == 1
+    assert hoisted.count(report.SHARED_PROMPT_MARKER) == 3
+
+
+def test_hoisting_is_per_case_so_a_case_section_stays_self_contained():
+    """Per CASE, not per run: a case's comment has to stand alone once the
+    document is split to fit the comment cap, so each case carries its own
+    shared block even when two cases happen to share the text."""
+    block = _prompt_block("chat", f"t\n{_SHARED}\ns")
+    document = _case("beat0-one", block, block) + "\n\n" + _case("beat0-two", block, block)
+    hoisted = report.hoist_shared_prompt_blocks(document)
+    assert hoisted.count(report.SHARED_PROMPT_HEADING) == 2
+    assert hoisted.count(_SHARED) == 2, "one per case — each section stands alone"
+
+
+def test_shared_lines_are_taken_wherever_they_fall_not_just_the_longest_run():
+    """Every shared line hoists, not merely the longest contiguous run of them.
+    A sample that gained a line mid-prompt (it created a collection, so its
+    self-state grew) splits the shared text in two — taking only the longest run
+    left the other half inline on exactly the cases that needed it most."""
+    head = "\n".join(f"top {n}" for n in range(20))
+    tail = "\n".join(f"bottom {n}" for n in range(20))
+    a = _prompt_block("chat", f"{head}\nONLY-A\n{tail}")
+    b = _prompt_block("chat", f"{head}\n{tail}")
+    hoisted = report.hoist_shared_prompt_blocks(_case("beat0", a, b))
+
+    assert hoisted.count("top 0") == 1, "the run before the gap hoists"
+    assert hoisted.count("bottom 0") == 1, "and so does the run after it"
+    assert "ONLY-A" in hoisted, "the line that made them differ stays with its sample"
+
+
+def test_a_single_sample_and_a_tiny_overlap_are_left_alone():
+    """Nothing to share (one sample) or nothing worth sharing (a block smaller
+    than the markup that would reference it) leaves the section byte-identical —
+    the saving has to be real, which is a derived condition, not a tuned number."""
+    lone = _case("beat0", _prompt_block("chat", f"only\n{_SHARED}"))
+    assert report.hoist_shared_prompt_blocks(lone) == lone
+
+    tiny = _case("beat0", _prompt_block("chat", "a\nx"), _prompt_block("chat", "b\nx"))
+    assert report.hoist_shared_prompt_blocks(tiny) == tiny
+
+
+def test_a_single_case_run_still_hoists():
+    """A single-case report renders no `### case` heading — the assembler omits
+    it — but its samples repeat their prompt just as hard, so the whole document
+    is one section and hoisting still applies."""
+    block = _prompt_block("chat", f"t\n{_SHARED}\ns")
+    document = f"run header line\n\n{block}\n\nsample one\n\n{block}\n\nsample two"
+    hoisted = report.hoist_shared_prompt_blocks(document)
+    assert report.SHARED_PROMPT_HEADING in hoisted
+    assert hoisted.count(_SHARED) == 1
+    assert hoisted.startswith("run header line"), "the header still opens the document"

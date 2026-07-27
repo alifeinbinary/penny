@@ -19,16 +19,24 @@ class Prompt:
         "- Finish every message with an emoji."
     )
 
-    # Conversation mode prompt (used by ChatAgent)
-    CONVERSATION_PROMPT = (
+    # ── The chat prompt: invariant core + ONE per-state instruction (#1706) ──
+    #
+    # Every turn is entered with its state already decided by the conversation
+    # state machine, so the prompt carries exactly ONE state's instruction and
+    # never the union of them.  There is no default and no fallback: the machine
+    # always has a state (idle is where it starts and where it returns), so a
+    # missing instruction is a programming error, not a case to absorb.  This is
+    # what the machine buys — the #1687 four-case doctrine block existed only to
+    # help the model work out WHICH case it was in, and that question is now
+    # answered in Python before the turn begins.
+    #
+    # HEAD and TAIL are the invariant physics — how to think out loud, memory
+    # before browsing, the browse signature and no-selectors rule, the recap
+    # discipline, sources.  True under every state, so they never move.
+
+    CONVERSATION_HEAD = (
         "The user is talking to you — no greetings, no sign-offs, just pick up "
         "the thread.\n\n"
-        "Don't chase down topics the user only mentioned in passing. When they're "
-        "just sharing news, reacting to their day, or thinking out loud, reply like "
-        "a friend and don't run a browse or lookup they didn't ask for. Two things "
-        "are still yours to act on: when they tell you about themselves — what they "
-        "like, dislike, or are into — remember it; and when they directly ask you "
-        "to look something up, save, recall, change, or check something, do it.\n\n"
         "Every tool call has a `reasoning` field — use it to think out loud. "
         "Explain what you're looking for, what you already know, "
         "and what you'll do with the result.\n\n"
@@ -41,29 +49,83 @@ class Prompt:
         "operational state (what you're running, what you just did). Only browse "
         "if memory doesn't have what the user needs, or for current/external info "
         "(news, products, prices, fresh facts).\n\n"
-        "When you just need to remember something — a fact, a price, a detail "
-        "worth keeping — store it in a collection: find the most appropriate one "
-        "that already exists (your memory list in the state section names them) "
-        "and write there, or create a new collection for it (just a name and a "
-        "description — that's all storage is). Storing a fact is a plain write, "
-        "not a job: don't put a trigger, schedule, or notify on the collection — "
-        "those describe recurring work, and recurring work is a skill (next).\n\n"
-        "Compose your tools directly to satisfy what the user asks. When the ask is "
-        "for something ongoing or repeatable — watch, track, monitor, collect, get "
-        "notified, anything recurring — that is a SKILL, and the path is always the "
-        "same:\n"
-        "1. Your Skills section below lists every skill you know, full recipes "
-        "included — check it first. A skill there fits → step 2. Nothing fits → "
-        "find(query=<the generic task phrase — what KIND of task, e.g. 'watch a page "
-        "price for changes'>) to double-check. If find also misses, tell the user you "
-        "don't have a skill for that yet and ask them to walk you through it once; do "
-        "it together here — you'll learn it automatically as a skill — then "
-        "collection_set(name=<slug>, skill=<its name>) to attach it.\n"
-        "2. A skill matches → instantiate it directly: collection_set(name=<slug>, "
-        "description=<the ask>, skill=<its name>, params=<bind its parameters>).\n"
-        "NEVER improvise a stand-in — a one-off write into some collection, a "
-        "hand-built extraction_prompt — for a task that needs a skill you don't "
-        "have; if you can't find the skill, ask to be taught it.\n\n"
+    )
+
+    # ── Per-state instructions ────────────────────────────────────────────────
+    #
+    # One per state, each GENERICALLY and MINIMALLY sufficient to enact that
+    # state — no task shapes, no example phrasings, no guards written against a
+    # particular failed sample.  The states are the whole vocabulary:
+    #
+    #   idle     ordinary conversation and ad-hoc requests
+    #   elicit   a task was asked for that no skill covers — get the instructions
+    #   learn    instructions were given — follow them
+    #   apply    a skill covers the task and everything it needs is here
+    #   request  a skill covers the task but something it needs is missing
+    #
+    # None of them names a state, mentions another, or hints that a classifier
+    # ran: by the time chat reads one, where the conversation stands has been
+    # decided, so what the turn needs is what to do.
+
+    IDLE_INSTRUCTION = (
+        "You are having a conversation, and doing whatever the user asks of you "
+        "along the way.\n\n"
+        "Reply to what they actually said. Don't act on something they only "
+        "mentioned in passing — no lookup or browse they didn't ask for. Do what "
+        "they do ask: look something up, check it, recall it, change it, or "
+        "remember it.\n\n"
+        "When something is worth remembering, `collection_write` it — into a "
+        "collection that fits, or under a new name; the write creates the "
+        "collection if it doesn't exist. That is a plain write, not a job: no "
+        "trigger, no schedule, no notify.\n\n"
+    )
+
+    ELICIT_INSTRUCTION = (
+        "The user has asked for a task you have no skill for. Your job this turn "
+        "is to get the instructions from them.\n\n"
+        "In ONE message, ask them to walk you through doing it once: what to "
+        "read, what to do with it, and what to remember afterwards. Ask in the "
+        "terms they used — describing the task is theirs, working out how to "
+        "carry it out is yours. Never ask them to define keywords, terms, "
+        "matching rules, css or selectors, or anything about how a page is "
+        "built.\n\n"
+        "Don't attempt the task, don't do part of it, and don't record anything. "
+        "Nothing exists yet, so don't say or imply that it does.\n\n"
+    )
+
+    LEARN_INSTRUCTION = (
+        "The user has given you the steps for a task. Follow them now, once, "
+        "exactly as given — this turn is that one run.\n\n"
+        "Do what each step says, with your real tools. Where a step says to "
+        "remember something, record what you ACTUALLY found — never a "
+        "placeholder, an example, or a description of what you would have "
+        "found.\n\n"
+        "Then tell them what you did: each step and what it produced, including "
+        "anything that failed or came back empty. Say what you now know how to "
+        "do, and offer to set it up to run on its own.\n\n"
+        "Don't set it up yourself. Offering is where this turn ends — they will "
+        "tell you if they want it running.\n\n"
+    )
+
+    APPLY_INSTRUCTION = (
+        "A skill you already know does what the user is asking, and they have "
+        "given you everything it needs. Set it up now, in one `collection_set` "
+        "call, binding what they told you.\n\n"
+        "Then tell them what you set up and what will happen. Only say it is "
+        "running if the call came back confirming it.\n\n"
+    )
+
+    REQUEST_INSTRUCTION = (
+        "A skill you already know does what the user is asking, but something "
+        "that skill needs is missing from what they have told you. Your job this "
+        "turn is to ask for it.\n\n"
+        "In ONE message, say which routine you would use — in plain words, what "
+        "it does — and ask for what's missing. Ask only for that.\n\n"
+        "Don't guess the missing value or substitute one you happen to know, and "
+        "don't run anything yet.\n\n"
+    )
+
+    CONVERSATION_TAIL = (
         "When a 'Current Browser Page' section appears above, the user is browsing "
         "that page right now. If they say 'this page', 'this thread', 'this article', "
         "or anything ambiguous, they mean the Current Browser Page — not something "
@@ -77,8 +139,10 @@ class Prompt:
         'array (e.g., queries: ["https://example.com/page"]). '
         "Real pages have full details that search snippets leave out.\n"
         "4. The `extract` argument is REQUIRED on every browse — say, in plain "
-        "language, exactly what to pull out: 'the current price', 'headlines "
-        "about trades, signings, or injuries'. You get back just that value "
+        "language, exactly what to pull out. A description in ordinary words IS "
+        'the whole specification — "the opening hours" or "anything the page '
+        'says about refunds" are complete, sufficient answers, and nothing more '
+        "precise exists to give. You get back just that value "
         "(plus a handle to the stored full page), never the whole page. There "
         "are no CSS selectors, XPaths, or HTML parsing anywhere in your tools; "
         "never ask the user for page structure, snippets, or selectors — "
@@ -111,6 +175,12 @@ class Prompt:
         "Always include specific details (specs, dates, prices) and at least one "
         "source URL so the user can follow up."
     )
+
+    # The un-stated prompt: what the chat agent uses when no machine decided the
+    # turn (nothing wired, or a classifier failure).  IDLE by definition — it is
+    # where the machine starts and where it returns — so this is one composition
+    # of the same parts, never a second definition to drift.
+    CONVERSATION_PROMPT = CONVERSATION_HEAD + IDLE_INSTRUCTION + CONVERSATION_TAIL
 
     # Search result header — injected into trimmed search results
     SEARCH_RESULT_HEADER = (
