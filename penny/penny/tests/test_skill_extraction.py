@@ -60,6 +60,7 @@ from penny.skill_extraction import (
     SkillExtracted,
     SkillExtractor,
 )
+from penny.tests.eval.test_state_transitions import learn_to_apply_fixture_skill
 from penny.tests.mocks.llm_patches import MockLlmClient
 from penny.tests.schema_template import migrated_db
 from penny.tools.memory_tools import collector_tool_surface
@@ -1025,3 +1026,40 @@ def test_skill_learned_narration_frame_renders_generic_name_and_demonstrated_on(
         "does (the steps), and name what you'd need from them to run it again (its "
         "required parameters). Then offer to set it running on a schedule if they'd like."
     )
+
+
+def test_learn_to_apply_eval_fixture_is_the_shape_this_pipeline_produces():
+    """The learn → apply enactment case (#1706) starts from the world a completed
+    teach round leaves behind, and builds its fixture skill by running THIS
+    module's verdict application over that round's ledger rather than
+    hand-writing the result.  Pin that here, where it costs no GPU: a distiller
+    or labeller change that reshapes the skill fails a plain test instead of
+    quietly handing the live case an easier — or impossible — starting world.
+    (It has already earned this: #1777 made the write target a placeholder, and
+    this pin is what reported the reshape rather than the eval discovering it on
+    a GPU run.)
+
+    Both placeholder ORIGINS ride in the one fixture — the entry key the
+    assistant invented (#1770) and the write target the attachment decides
+    (#1777) — so the demonstrated collection and the demonstrated key are BOTH
+    absent from the render, which is the property the enactment case leans on."""
+    skill = learn_to_apply_fixture_skill()
+    assert sorted(parameter.name for parameter in skill.parameters) == ["url", "what_to_find"]
+    placeholders = [
+        substitution
+        for step in skill.steps
+        for substitution in step.substitutions
+        if substitution.kind == SkillSubKind.PLACEHOLDER
+    ]
+    assert [substitution.description for substitution in placeholders] == [
+        WRITE_TARGET_DESCRIPTION,
+        "what to call the entry it saves",
+    ]
+    # The harm placeholders exist to prevent: a collector re-running this skill
+    # must write neither the demonstrated key nor the demonstrated collection
+    # back every cycle — and the ambient recipe must promise neither.
+    rendered = render_skill(skill.steps, {"url": "https://example.test", "what_to_find": "x"})
+    assert "aurora deck 2 price" not in rendered
+    assert "aurora-deck-2-price" not in rendered
+    assert "{what to call the entry it saves}" in rendered
+    assert f"{{{WRITE_TARGET_DESCRIPTION}}}" in rendered
