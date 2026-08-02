@@ -15,6 +15,12 @@ shapes are the later beats' business):
     elicit → learn  "go to the site, find the price, remember it"   → runs it once, remembers
     learn → apply   "now do that hourly until 10pm and tell me"     → a live watch
 
+Each case's seeded state is the PRECEDING beat's terminal state and nothing
+more — one edge is one message answered against where the last edge stopped.
+Replaying earlier turns is not neutral: the apply case seeded the instigating
+ask as well, and the classifier duly read "the task being worked on" as a setup
+still being specified, which it no longer was.
+
 **Learning attaches nothing** (#1706, replacing #1687's run-end auto-attach): the
 machine makes teaching and instantiating two clear turns, so the demonstrated
 round leaves a naive collection_write behind — a collection with a value in it
@@ -52,7 +58,7 @@ from penny.database.skills import (
 # has to be the SHAPE run-end extraction really produces (two bindable
 # parameters and one placeholder), and re-implementing that mapping here would
 # be a fixture that drifts from the pipeline it stands in for.
-from penny.skill_extraction import _apply_parameter_labels
+from penny.skill_extraction import _apply_parameter_labels, _constant_keys
 from penny.tests.conftest import TEST_SENDER, require_memory
 from penny.tests.eval.conftest import (
     ChatEval,
@@ -66,15 +72,11 @@ from penny.tests.eval.conftest import (
     tool_was_called,
 )
 from penny.tests.eval.test_watch_journey import AURORA_LISTING_499, LISTING_URL
-from penny.tools.micro_context import ParameterLabel, ParameterVerdict, SkillLabel
+from penny.tools.micro_context import ParameterLabel, ParameterVerdict, SkillLabel, SkillShape
 
 pytestmark = pytest.mark.eval
 
 _FAMILY = "state-transitions"
-
-# The instigating ask (turn 1 of the script) — the message the machine is parked
-# on when a later edge is under test.
-_AUCTION_ASK = f"hey can you watch the auction at {LISTING_URL} for me?"
 
 # elicit → learn: the user answers the teach question with the steps.
 _TEACH_TURN = f"yeah go to {LISTING_URL}, find the price, and remember it"
@@ -162,6 +164,55 @@ def _untraceable_parameters(db: Database) -> list[str]:
     return untraceable
 
 
+# The role of a leaf NO substitution covers — it renders verbatim, which is exactly a
+# baked value.  Deliberately NOT a ``SkillSubKind`` member: that enum names kinds of
+# SUBSTITUTION, and a constant is the absence of one.
+_ROLE_CONSTANT = "constant"
+
+
+def _find_instruction_role(db: Database) -> str | None:
+    """What role the learned skill gives the browse ``extract`` leaf — the value that
+    says WHAT to pull off the page (#1803).
+
+    :data:`_ROLE_CONSTANT` when NO substitution covers it: a leaf nothing covers renders
+    verbatim, which is exactly a baked value. Otherwise the substitution's own kind
+    (``hole`` = still asked for, ``placeholder`` = nobody can supply it). ``None`` when
+    no skill or no browse step exists, which the caller reads as nothing to score.
+
+    Read STRUCTURALLY off the leaf's path rather than by matching the demonstrated
+    text, because what the assistant passes to ``extract`` is its own wording of the
+    user's intent ("the price" / "the current price") and is not predictable. This case
+    is a browse round, so naming that step is the same fixture-anchoring
+    ``_untraceable_parameters`` already relies on — nothing in production keys off a
+    tool name."""
+    for skill in db.skills.list_all():
+        for step in steps_from_json(skill.steps):
+            if step.tool != "browse":
+                continue
+            covering = [sub for sub in step.substitutions if sub.path == ["extract"]]
+            return covering[0].kind.value if covering else _ROLE_CONSTANT
+    return None
+
+
+def _page_is_bindable(db: Database) -> bool:
+    """A required parameter was demonstrated with the PAGE — so the routine can be
+    pointed at a different listing next time.
+
+    Checks the value, never the label, for the reason ``_untraceable_parameters``
+    gives: a correctly-named ``url`` parameter contains neither the address nor any
+    word the user used."""
+    for skill in db.skills.list_all():
+        required = {p.name for p in parameters_from_json(skill.parameters) if p.required}
+        for step in steps_from_json(skill.steps):
+            for sub in step.substitutions:
+                if (
+                    sub.parameter in required
+                    and LISTING_URL.lower() in str(_leaf_at(step.arguments, sub.path)).lower()
+                ):
+                    return True
+    return False
+
+
 def _score_elicit_to_learn(db: Database, before: set[str], reply: str) -> list[Check]:
     """The demonstrated round ran, and NOTHING was instantiated.
 
@@ -172,6 +223,7 @@ def _score_elicit_to_learn(db: Database, before: set[str], reply: str) -> list[C
     created = new_collections(db, before)
     written = _entries_written_by_this_run(db)
     instantiated = [row for row in db.memories.list_all() if row.skill_name is not None]
+    find_role = _find_instruction_role(db)
     return [
         Check(
             "state: she browsed the listing (the demonstrated fetch happened)",
@@ -213,6 +265,27 @@ def _score_elicit_to_learn(db: Database, before: set[str], reply: str) -> list[C
         )
         if created
         else Check.na("state: nothing it created was scheduled (no trigger, no notify)"),
+        # #1803: the round supplies the page AND what to find on it, both from the
+        # user — but only one of them varies between uses.  The skill is a price
+        # watcher, so the price is what it IS (baked, never asked for again) and the
+        # page is what it is POINTED AT (a parameter).  Before the shape draw both
+        # were required parameters, which is why the routine could not fire from the
+        # natural second ask.
+        Check(
+            "state: the page stays a parameter (a new listing can be bound)",
+            _page_is_bindable(db),
+            kind="state",
+        ),
+        Check(
+            "state: what to find is baked, not asked for again",
+            find_role == _ROLE_CONSTANT,
+            rationale=(
+                None if find_role == _ROLE_CONSTANT else f"the extract leaf is a {find_role}"
+            ),
+            kind="state",
+        )
+        if find_role is not None
+        else Check.na("state: what to find is baked, not asked for again"),
         Check(
             "state: every required parameter is one the user supplied",
             not _untraceable_parameters(db),
@@ -338,11 +411,17 @@ _VERDICTS = {
 def learn_to_apply_fixture_skill() -> SkillDraft:
     """The skill that round leaves in the registry, built by the PRODUCTION
     pipeline over its ledger — ``distill_steps`` for the structure, the real
-    verdict application for the labels, with a hand-written ``SkillLabel``
-    standing in for the one live naming draw.  So the case's starting world is
-    the shape extraction actually produces, not a convenient copy of it: two
-    bindable parameters the conversation can supply, and a placeholder no user
-    could."""
+    verdict application for the labels, with a hand-written ``SkillLabel`` and
+    ``SkillShape`` standing in for the two live run-end draws.  So the case's
+    starting world is the shape extraction actually produces, not a convenient
+    copy of it.
+
+    Since #1803 that shape is ONE bindable parameter — the page — plus the value
+    the routine is ABOUT, baked into the step and never asked for again, and a
+    placeholder no user could supply.  It used to be two bindable parameters, and
+    the measured `elicit → learn` beat now produces this shape 8 times out of 8, so
+    seeding the old one would park this case on a world the preceding beat can no
+    longer hand it."""
     # The registry as this fixture's round saw it — #1783 marks a leaf whose
     # demonstrated value names one of Penny's collections, so the destination is
     # only adjudicated as one if the collection actually existed.
@@ -356,9 +435,17 @@ def learn_to_apply_fixture_skill() -> SkillDraft:
             assert value in _VERDICTS, f"fixture has no verdict for {sub.parameter!r} = {value!r}"
             verdicts[sub.parameter] = _VERDICTS[value]
     label = SkillLabel(name=_SKILL_NAME, description=_SKILL_DESCRIPTION, parameters=verdicts)
-    steps, parameters = _apply_parameter_labels(steps, parameters, label)
-    assert sorted(p.name for p in parameters) == ["url", "what_to_find"], (
-        f"the fixture skill must carry exactly the two user-supplied parameters: {parameters}"
+    # The shape draw's half: the routine is ABOUT what to find, and POINTED AT the
+    # page.  Mapped home through the production seam, so the fixture cannot encode a
+    # split the real pipeline could not produce.
+    shape = SkillShape(
+        name=_SKILL_NAME, description=_SKILL_DESCRIPTION, fixed=frozenset({"what to find"})
+    )
+    steps, parameters = _apply_parameter_labels(
+        steps, parameters, label, _constant_keys(label, shape)
+    )
+    assert sorted(p.name for p in parameters) == ["url"], (
+        f"the fixture skill must carry exactly the page as its one parameter: {parameters}"
     )
     return SkillDraft(
         name=_SKILL_NAME,
@@ -370,11 +457,14 @@ def learn_to_apply_fixture_skill() -> SkillDraft:
     )
 
 
-# What the round reported, and the offer the learn instruction ends every round
-# with — the message the user is answering, and the reason this edge exists.
+# The learn round's closing reply, in the shape LEARN_INSTRUCTION asks for: what
+# each step produced, what she now knows how to do, and the offer to set it
+# running.  That last clause is the message this edge's user turn answers — an
+# acceptance is only an acceptance of something.
 _PENNY_REPORT = (
-    f"Opened the listing, found {_PRICE}, and saved it to {_WATCH_COLLECTION}. "
-    "Want me to keep an eye on it for you from now on?"
+    f"Opened the listing, found the price ({_PRICE}), and saved it to "
+    f"{_WATCH_COLLECTION}. I know how to do that now — read a listing page and "
+    "record the price it shows. Want me to keep it up to date on its own?"
 )
 
 # learn → apply: the offer taken up.  It names a cadence, an end condition, and
@@ -383,16 +473,23 @@ _APPLY_TURN = "perfect — do that every hour until 10pm tonight and tell me if 
 
 
 def _seed_demonstrated_round(db: Database) -> None:
-    """Lay down the state a completed teach round leaves: the conversation up to
-    and including the offer, the collection the round wrote into (holding the
-    price, attached to nothing), and the machine parked in learn on the
-    instigating ask."""
-    ask_id = db.messages.log_message(
-        direction=PennyConstants.MessageDirection.INCOMING,
-        sender=TEST_SENDER,
-        content=_AUCTION_ASK,
-    )
-    db.messages.log_message(
+    """Lay down the state the PRECEDING beat ends in, item for item — this edge
+    starts where ``elicit → learn`` stops, so its precondition is that beat's
+    scored terminal state and nothing else:
+
+    * the teach turn that opened the learn round, and Penny's closing report —
+      she ran it, and she says what she now knows how to do
+    * the collection her naive write created, holding the price, carrying no
+      skill and no program and no schedule (learning instantiates nothing)
+    * a learned skill in the registry (seeded by the case's ``seed_skills``)
+    * the machine parked in ``learn``, anchored to the teach turn
+
+    The instigating ask ("can you watch this for me?") is deliberately ABSENT.
+    It belongs to the beat before — ``idle → elicit`` — and seeding it made the
+    classifier read "the task being worked on" as a setup still being specified,
+    which is a fair reading of a request that has not been carried out yet.  It
+    has been: that is what the learn round did."""
+    teach_id = db.messages.log_message(
         direction=PennyConstants.MessageDirection.INCOMING,
         sender=TEST_SENDER,
         content=_TEACH_TURN,
@@ -407,7 +504,7 @@ def _seed_demonstrated_round(db: Database) -> None:
         [EntryInput(key=_DEMO_KEY, content=_PRICE)],
         author=PennyConstants.CHAT_AGENT_NAME,
     )
-    _park(db, ConversationState.LEARN, anchor_message_id=ask_id)
+    _park(db, ConversationState.LEARN, anchor_message_id=teach_id)
 
 
 def _instantiated(db: Database):

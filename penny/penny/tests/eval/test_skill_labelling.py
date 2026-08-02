@@ -20,6 +20,11 @@ two entries, two entries are the skill — that is the model's latitude, adjusta
 by the user and Penny discussing it (the code owner's ruling on #1770).  These cases fix
 the round and vary only the judgment.
 
+The SHAPE draw that decides the routine's name and which values are constant
+(#1803) is a different micro-context answering a different question, and it has
+its own contract in ``test_skill_shape.py`` — these two cases are the labeller's,
+and they run when the LABELLER changes.
+
 All content is synthetic (aurora / faux-market).
 """
 

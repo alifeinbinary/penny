@@ -180,7 +180,7 @@ def test_system_prompt_whole_render():
         "STATE: <name>\n"
         "The name must be one of the listed transitions, copied EXACTLY. When the "
         "chosen transition directs it, add exactly one more line — SKILL: <the skill's "
-        "name, copied exactly from Known skills> — and nothing more.\n"
+        "name, exactly as quoted in Known skills> — and nothing more.\n"
         "IMPORTANT: write nothing else — no preamble, no explanation, no restating the "
         "messages."
     )
@@ -313,7 +313,7 @@ def test_render_parked_learn_with_candidates_whole():
         "hey can you keep an eye on the harbor ferry timetable for me?\n"
         "\n"
         "## Known skills\n"
-        "- watch a listing price for changes — checks a page and records the current "
+        '- "watch a listing price for changes" — checks a page and records the current '
         "price (needs: url — the listing page to watch)\n"
         "\n"
         "## The user's newest message\n"
@@ -331,7 +331,7 @@ def test_render_parked_learn_with_candidates_whole():
         "instructions. Only a change to the routine's own steps — what to read, what to "
         "look for, what to remember, where to save it — is instructions, even when it "
         "also sounds like a yes. Add a second line naming that skill: SKILL: <its name, "
-        "copied exactly from Known skills>\n"
+        "exactly as quoted in Known skills>\n"
         "- learn — the user's message is a set of instructions to follow for the task "
         "being worked on — what to read, what to look for, what to remember, including "
         "corrections to previous steps\n"
@@ -344,14 +344,14 @@ def test_render_idle_with_candidates_whole():
     metadata in Known skills, and the apply transition joining the list with
     its coverage condition + the SKILL: directive.  A parameterless candidate
     renders without the needs tail, byte-identical."""
-    assert SkillCandidate(name="x", description="y").render() == "x — y"
+    assert SkillCandidate(name="x", description="y").render() == '"x" — y'
     with_skills = MachineSnapshot(state=ConversationState.IDLE, skill_candidates=[_SKILL])
     assert render_classifier_content(with_skills, "what's the ferry price at today?") == (
         "## The assistant's last message\n"
         "(none)\n"
         "\n"
         "## Known skills\n"
-        "- watch a listing price for changes — checks a page and records the current "
+        '- "watch a listing price for changes" — checks a page and records the current '
         "price (needs: url — the listing page to watch)\n"
         "\n"
         "## The user's newest message\n"
@@ -364,11 +364,11 @@ def test_render_idle_with_candidates_whole():
         "## Transitions\n"
         "- apply — one of the known skills does what they are asking for AND their "
         "message supplies everything that skill needs — mere resemblance to a skill is "
-        "not coverage — add a second line naming that skill: SKILL: <its name, copied "
-        "exactly from Known skills>\n"
+        "not coverage — add a second line naming that skill: SKILL: <its name, exactly "
+        "as quoted in Known skills>\n"
         "- request — a known skill looks like it covers what they are asking "
         "for, but something that skill needs is missing from their message — add a "
-        "second line naming that skill: SKILL: <its name, copied exactly from Known "
+        "second line naming that skill: SKILL: <its name, exactly as quoted in Known "
         "skills>\n"
         "- learn — the user's message is a set of instructions to follow for the task "
         "being worked on — what to read, what to look for, what to remember, including "
@@ -771,6 +771,26 @@ def test_elicit_instruction_whole_render():
         "built.\n\n"
         "Don't attempt the task, don't do part of it, and don't record anything. "
         "Nothing exists yet, so don't say or imply that it does.\n\n"
+    )
+
+
+def test_apply_instruction_whole_render():
+    """The whole instruction, verbatim — pinned so an edit is a visible diff.
+
+    ONE coherent statement, not a boundary policed twice: the call to make, then the
+    scope of the turn (configuring is all of it, the routine runs itself afterwards),
+    then what to report and the one condition on claiming it is running.  It was
+    patched by accretion once — a third paragraph restating the reporting boundary from
+    another angle — which is the drift this literal makes visible."""
+    assert Prompt.APPLY_INSTRUCTION == (
+        "A skill you already know does what the user is asking, and they have "
+        "given you everything it needs. Set it up now, in one `collection_set` "
+        "call, binding what they told you.\n\n"
+        "Configuring it is the whole turn — you are not carrying the routine out "
+        "yourself. Once it is set up it runs itself on the schedule they just "
+        "gave you, and its first run is the first thing they'll hear about.\n\n"
+        "Then tell them what you set up and what will happen. Say it is running "
+        "only if the call came back confirming it.\n\n"
     )
 
 
