@@ -3046,6 +3046,14 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 # exactly what the second run did to two of them.
 _DIGIT_SUFFIX_RE = re.compile(r"([a-z]+)(\d+)")
 
+# Lettering is the OTHER natural way to write that same enumeration — ``url_a`` /
+# ``url_b`` — and it cost two correct draws the same way digits once did: two distinct,
+# generic, scalar names satisfying the tell-them-apart rule, read by the scorer as
+# answering neither ordinal family.  A trailing single letter is therefore the position
+# it holds in the alphabet, which lands the pair on the families that already carry
+# ``1`` / ``2`` — no family gains a token, so nothing else can start matching.
+_ORDINAL_LETTERS = "abcdefghijklmnopqrstuvwxyz"
+
 # Write-time GARNISH: an example of THIS occasion's value hung off an otherwise generic
 # line — ``the page to check (e.g., bookbarn.example/atlas-of-clouds)``.  The fourth run's
 # thinking traces settled what it is: the drafted lines carried no example at all, and the
@@ -3098,6 +3106,37 @@ def _tokens(text: str) -> set[str]:
     return found
 
 
+def _letter_suffix_ordinal(tokens: list[str]) -> str | None:
+    """The digit a NAME's trailing single-letter suffix stands for — ``url_a`` → ``1`` —
+    or ``None`` when the name carries no such suffix.
+
+    A suffix needs something to be suffixed TO, so a name that is ONLY a letter is left
+    alone: ``a`` is a name nobody enumerated, not the first of anything.  The
+    single-CHARACTER test is load-bearing, not decoration: membership in a string is a
+    SUBSTRING test, so without it a name ending in ``no`` would read as a letter suffix
+    and score as the fourteenth of something."""
+    last = tokens[-1] if tokens else ""
+    if len(tokens) < 2 or len(last) != 1 or last not in _ORDINAL_LETTERS:
+        return None
+    return str(_ORDINAL_LETTERS.index(last) + 1)
+
+
+def _name_tokens(name: str) -> set[str]:
+    """A drawn NAME's tokens: :func:`_tokens` plus the ordinal any trailing single-letter
+    suffix stands for, so ``url_a``/``url_b`` classify as the two ordinal families
+    exactly as ``site1``/``site2`` and ``url_1``/``url_2`` already do.
+
+    NAME-only, and that is the whole reason it is a separate function rather than a
+    widening of :func:`_tokens`: carving a suffix off an identifier is an identifier
+    operation, while a description is PROSE, where ``a`` is an article.  Reading a
+    letter as an ordinal there would file most descriptions ever written under the
+    first-ordinal family — which is precisely why the letters are not family tokens."""
+    tokens = _TOKEN_RE.findall(name.lower())
+    found = _tokens(name)
+    ordinal = _letter_suffix_ordinal(tokens)
+    return found | {ordinal} if ordinal is not None else found
+
+
 def _without_examples(text: str) -> str:
     """``text`` with any example clause removed — ``the plot to log (e.g., 17)`` → ``the
     plot to log``, and the same for a trailing ``, e.g. 17`` with no parentheses.
@@ -3116,15 +3155,24 @@ def _substance_tokens(parameter: FramedParameter) -> set[str]:
     )
 
 
-def _matching_family(text: str, families: Sequence[ParameterFamily]) -> ParameterFamily | None:
-    """The first family whose agreed tokens ``text`` uses, or ``None``."""
-    return next((f for f in families if _tokens(text) & set(f.tokens)), None)
+def _matching_family(
+    tokens: set[str], families: Sequence[ParameterFamily]
+) -> ParameterFamily | None:
+    """The first family whose agreed tokens ``tokens`` uses, or ``None``.
+
+    Takes the TOKENS rather than the text, because how a string tokenizes is the pass's
+    business, not this function's: a name is an identifier (``_name_tokens``, which reads
+    a trailing letter as an ordinal) and a description is prose (``_tokens``)."""
+    return next((f for f in families if tokens & set(f.tokens)), None)
 
 
-def _classified(
-    signature: SkillSignature, families: Sequence[ParameterFamily]
-) -> dict[str, list[FramedParameter]]:
-    """Every drawn parameter grouped under the family it answers, NAME FIRST (#1830).
+def classify_by_family(
+    named: Sequence[tuple[str, str]], families: Sequence[ParameterFamily]
+) -> list[ParameterFamily | None]:
+    """The family each ``(name, description)`` pair answers, positionally — NAME FIRST
+    (#1830).  ONE classification discipline, read by every suite that asks what a drawn
+    parameter answers (the framer's own set check, and the transitions suite's
+    interface check).
 
     A parameter's name is its identity, so the name pass runs over ALL of them before
     any description is read, and a family a name already claimed is closed to the
@@ -3135,14 +3183,25 @@ def _classified(
     A ``name_only`` family sits out the description pass entirely — the page/url
     tightening from the first run's review: a parameter is the page when it is NAMED as
     the page, and no description-level mention promotes one that isn't."""
-    by_name = {p.name: _matching_family(p.name, families) for p in signature.parameters}
-    claimed = {family.label for family in by_name.values() if family is not None}
+    by_name = [_matching_family(_name_tokens(name), families) for name, _ in named]
+    claimed = {family.label for family in by_name if family is not None}
     open_families = [
         family for family in families if family.label not in claimed and not family.name_only
     ]
+    return [
+        matched or _matching_family(_tokens(description), open_families)
+        for matched, (_, description) in zip(by_name, named, strict=True)
+    ]
+
+
+def _classified(
+    signature: SkillSignature, families: Sequence[ParameterFamily]
+) -> dict[str, list[FramedParameter]]:
+    """Every drawn parameter grouped under the family it answers — the framer suite's
+    view of :func:`classify_by_family`, which owns the discipline."""
+    answered = classify_by_family([(p.name, p.description) for p in signature.parameters], families)
     grouped: dict[str, list[FramedParameter]] = {family.label: [] for family in families}
-    for parameter in signature.parameters:
-        family = by_name[parameter.name] or _matching_family(parameter.description, open_families)
+    for parameter, family in zip(signature.parameters, answered, strict=True):
         if family is not None:
             grouped[family.label].append(parameter)
     return grouped
