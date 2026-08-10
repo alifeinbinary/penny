@@ -163,6 +163,15 @@ STATE_DEFINITIONS: dict[ConversationState, str] = {
 # renders last as "in all other cases", so a message meeting none of the real
 # conditions has an unambiguous home instead of being forced into the nearest
 # positive clause.
+#
+# Each condition states its OWN shape and nothing else — a CHOICE MENU, where the
+# reader compares the message against every option rather than being talked out of
+# one option inside another.  No edge describes a sibling's case or argues against
+# it: the sibling is right there in the same list saying what it is, and a condition
+# that also has to describe its neighbour is the neighbour's own wording having
+# failed.  Naming your OWN near-misses is not that — the parked-learn correction edge
+# says which messages carry no correction, which is still a statement about what IT
+# is, and it is there because a nearby shape was measured landing here wrongly.
 TRANSITIONS: dict[tuple[ConversationState, ConversationState], str] = {
     (ConversationState.IDLE, ConversationState.APPLY): (
         "one of the known skills does what they are asking for AND their "
@@ -202,19 +211,18 @@ TRANSITIONS: dict[tuple[ConversationState, ConversationState], str] = {
         "back, or a clarification about the task itself"
     ),
     (ConversationState.LEARN, ConversationState.APPLY): (
-        "they are asking for the routine just demonstrated to run on its own. "
-        "How often it runs, how long it keeps running, and whether it tells "
-        "them are the job's terms; naming any of those is expected here and "
-        "does not make the message instructions. Only a change to the "
-        "routine's own steps — what to read, what to look for, what to "
-        "remember, where to save it — is instructions, even when it also "
-        f"sounds like a yes. Add a second line naming that skill: {SKILL_TAG} "
-        "<its name, exactly as quoted in Known skills>"
+        "the user signals positively — accepting what was just demonstrated: a yes, a "
+        "great, a go-ahead. They often add how the job should run — its timing, how "
+        "long it keeps going, or whether to tell them — but a plain acceptance is "
+        "enough. Add a second line naming that skill: "
+        f"{SKILL_TAG} <its name, exactly as quoted in Known skills>"
     ),
     (ConversationState.LEARN, ConversationState.LEARN): (
-        "the user's message is a set of instructions to follow for the task "
-        "being worked on — what to read, what to look for, what to remember, "
-        "including corrections to previous steps"
+        "the user is correcting their previous instructions — this message itself "
+        "restates the steps with changes: what to read, what to look for, what to "
+        "remember, where to save it — or asks to simply run it again after a hiccup. "
+        "A message that only says the round was wrong, or promises new instructions "
+        "later, carries no correction."
     ),
 }
 

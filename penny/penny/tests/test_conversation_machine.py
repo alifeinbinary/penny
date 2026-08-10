@@ -251,9 +251,17 @@ def test_render_parked_elicit_slice_whole():
 def test_render_parked_learn_slice_whole():
     """The parked-learn render after a FAILED round, whole: with nothing in the
     registry the skill-gated apply edge is withheld, so the union narrows to
-    learn (the user provided instructions) and idle (everything else, the
-    declared default).  There is no path back to elicit: elicit exists to GET
-    the instructions, and they have been given."""
+    learn and idle (everything else, the declared default).  There is no path
+    back to elicit: elicit exists to GET the instructions, and they have been
+    given.
+
+    Once a round has run, learn's condition is the CORRECTION shape in two
+    cases: the steps restated with changes, or a plain ask to run it again after
+    a hiccup — which is this sample's message, and which restates no steps at
+    all.  Either way the correction has to be IN the message: saying only that
+    the round was wrong, or promising new instructions later, carries none,
+    which is what keeps a bail on the idle default rather than reading as a
+    correction because it sounds dissatisfied."""
     parked_learn = MachineSnapshot(
         state=ConversationState.LEARN,
         penny_last_turn=(
@@ -282,9 +290,11 @@ def test_render_parked_learn_slice_whole():
         "is never learn\n"
         "\n"
         "## Transitions\n"
-        "- learn — the user's message is a set of instructions to follow for the task "
-        "being worked on — what to read, what to look for, what to remember, including "
-        "corrections to previous steps\n"
+        "- learn — the user is correcting their previous instructions — this message "
+        "itself restates the steps with changes: what to read, what to look for, what "
+        "to remember, where to save it — or asks to simply run it again after a "
+        "hiccup. A message that only says the round was wrong, or promises new "
+        "instructions later, carries no correction.\n"
         "- idle — in all other cases"
     )
 
@@ -294,7 +304,13 @@ def test_render_parked_learn_with_candidates_whole():
     offering to set the routine running, the skill it just taught is in the
     registry, so apply joins the union with the SKILL: directive — the edge the
     acceptance takes.  Nothing about the values it needs is asked for: the
-    round that just ran supplied them."""
+    round that just ran supplied them.
+
+    The two live edges are a CHOICE MENU, each stating only its own shape: apply
+    is an acceptance of what was just demonstrated, with the job's terms welcome
+    but not required; learn is a correction the message itself carries — steps
+    restated with changes, or an ask to just run it again.  Neither argues
+    against the other — the sibling is in the same list saying what it is."""
     taught = MachineSnapshot(
         state=ConversationState.LEARN,
         penny_last_turn=(
@@ -325,16 +341,16 @@ def test_render_parked_learn_with_candidates_whole():
         "is never learn\n"
         "\n"
         "## Transitions\n"
-        "- apply — they are asking for the routine just demonstrated to run on its own. "
-        "How often it runs, how long it keeps running, and whether it tells them are the "
-        "job's terms; naming any of those is expected here and does not make the message "
-        "instructions. Only a change to the routine's own steps — what to read, what to "
-        "look for, what to remember, where to save it — is instructions, even when it "
-        "also sounds like a yes. Add a second line naming that skill: SKILL: <its name, "
+        "- apply — the user signals positively — accepting what was just demonstrated: "
+        "a yes, a great, a go-ahead. They often add how the job should run — its "
+        "timing, how long it keeps going, or whether to tell them — but a plain "
+        "acceptance is enough. Add a second line naming that skill: SKILL: <its name, "
         "exactly as quoted in Known skills>\n"
-        "- learn — the user's message is a set of instructions to follow for the task "
-        "being worked on — what to read, what to look for, what to remember, including "
-        "corrections to previous steps\n"
+        "- learn — the user is correcting their previous instructions — this message "
+        "itself restates the steps with changes: what to read, what to look for, what "
+        "to remember, where to save it — or asks to simply run it again after a "
+        "hiccup. A message that only says the round was wrong, or promises new "
+        "instructions later, carries no correction.\n"
         "- idle — in all other cases"
     )
 

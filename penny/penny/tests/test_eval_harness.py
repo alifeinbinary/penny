@@ -56,19 +56,32 @@ from penny.tests.eval.conftest import (
     _without_examples,
     _write_sample_report,
     continue_nudge_fired,
+    count_tool_calls,
     draw_rerolled,
+    is_seeded_run,
+    live_prompt_perf,
     routing_clean,
     run_exhibited_pathology,
     sample_is_fragile,
+    seeded_run_id,
     tool_call_rejected,
     tool_not_called,
     tool_was_called,
 )
 from penny.tests.eval.test_skill_framing import FIXTURES as FRAMING_FIXTURES
 from penny.tests.eval.test_skill_labelling import FIXTURES as LABELLING_FIXTURES
-from penny.tests.eval.test_state_transitions import _interface_check
-from penny.tests.schema_template import schema_only_db
+from penny.tests.eval.test_state_transitions import (
+    APPLY_CASES,
+    _interface_check,
+    assert_round_cites_its_run,
+    assert_seeded_ledger,
+    cadence_seconds,
+    rule_parts,
+    seed_learned_round,
+)
+from penny.tests.schema_template import migrated_db, schema_only_db
 from penny.tools.base import FRAMEWORK_NARRATION_INVALID_ARGS, Tool
+from penny.tools.collection_instantiation import _LINE_ESCAPE
 from penny.tools.micro_context import FramedParameter, LeafLabel, SkillLabels, SkillSignature
 from penny.tools.models import ToolResult
 
@@ -176,6 +189,77 @@ def test_tool_not_called_reads_the_promptlog(tmp_path) -> None:
     assert tool_was_called(db, "collection_write")
     assert not tool_not_called(db, "collection_write")
     assert tool_not_called(db, "send_message")
+
+
+def test_a_cadence_is_read_from_the_rule_not_from_its_spelling() -> None:
+    """The learn → apply cases score the CADENCE the acceptance asked for, never the rule
+    spelling that says so (#1857) — so every rule that fires at the asked-for interval
+    passes, whatever FREQ/INTERVAL pair the model chose to write it with.
+
+    Pinned without a GPU because it is pure: the reader walks the rule's own occurrences,
+    so a daily cadence written three different ways reads as one answer, and the
+    time-of-day anchor is read as a stated PART (dateutil defaults an unstated hour to the
+    start's, so the parsed rule cannot tell a chosen hour from an inherited one)."""
+    hourly = ("FREQ=HOURLY", "FREQ=HOURLY;INTERVAL=1", "FREQ=MINUTELY;INTERVAL=60")
+    daily = ("FREQ=DAILY", "FREQ=DAILY;BYHOUR=8", "FREQ=HOURLY;INTERVAL=24")
+    for rule in hourly:
+        assert cadence_seconds(rule) == 3600, rule
+    for rule in daily:
+        assert cadence_seconds(rule) == 86400, rule
+    assert cadence_seconds("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=8") == 86400
+    assert cadence_seconds("FREQ=WEEKLY") == 604800
+    assert cadence_seconds("FREQ=HOURLY;INTERVAL=2") == 7200
+    assert cadence_seconds("FREQ=MINUTELY;INTERVAL=120") == 7200
+    assert cadence_seconds("FREQ=DAILY;COUNT=1") is None, "a rule that fires once has no cadence"
+
+    assert "BYHOUR" in rule_parts("FREQ=DAILY;BYHOUR=8"), "a stated hour reads as stated"
+    assert "BYHOUR" not in rule_parts("FREQ=DAILY"), "an unstated hour is not invented"
+    two_line = f"DTSTART:20260101T080000Z{_LINE_ESCAPE}RRULE:FREQ=DAILY;BYHOUR=8"
+    assert rule_parts(two_line) == {"FREQ", "BYHOUR"}, "the rule line is read past its DTSTART"
+    assert cadence_seconds(two_line) == 86400, "a one-line render round-trips into the reader"
+
+
+def test_every_apply_case_seeds_a_round_that_cites_its_own_run(tmp_path) -> None:
+    """The learn → apply seeds write a whole prior turn — messages, promptlog rows, the
+    collection and its entry, both transition rows — and their loud probes only run under
+    ``make eval``, where a raise costs an hour of GPU before it is seen.  Drive each case's
+    seeder here instead, against a real migrated database, and run the two probes that read
+    the LEDGER: the round's calls are in it, and everything it produced cites the run that
+    produced it.
+
+    The registry probe is not run here — it reads fixture skills the harness seeds after the
+    case's own seed — so this pins exactly the half that is code."""
+    for index, case in enumerate(APPLY_CASES):
+        db = migrated_db(str(tmp_path / f"apply-{index}.db"))
+        seed_learned_round(case)(db)
+        assert_seeded_ledger(db, case)
+        assert_round_cites_its_run(db, case)
+
+
+def test_a_seeded_prior_turn_is_not_read_as_this_samples_work(tmp_path) -> None:
+    """A case may seed the promptlog of turns that happened BEFORE the one under test
+    (#1846), so the sample is answered against the state those turns really left.  Those
+    rows are history: every "what did the model do" reader excludes them by their run id,
+    which the seeder mints under the shared prefix.
+
+    Pinned here because the exclusion is what keeps a negative check honest — a seeded
+    round's browse must not read as this turn's, which is exactly the check the learn →
+    apply cases score ("she set it running instead of running it again").  A live run's
+    own rows are untouched, so every other case reads identically to before."""
+    db = _make_db(tmp_path)
+    _log_prompt(db, response=_tool_call_response("browse"), run_id=seeded_run_id("learn-turn"))
+    assert tool_not_called(db, "browse"), "a seeded prior turn's call is not this sample's"
+    assert count_tool_calls(db, "browse") == 0
+    assert live_prompt_perf(db).calls == 0, "a seeded row is not one of this sample's calls"
+
+    _log_prompt(db, response=_tool_call_response("browse"), run_id="r1")
+    assert tool_was_called(db, "browse"), "the sample's own call still reads"
+    assert count_tool_calls(db, "browse") == 1, "only the live call is counted"
+    assert live_prompt_perf(db).calls == 1
+
+    assert is_seeded_run(seeded_run_id("learn-turn"))
+    assert not is_seeded_run("r1")
+    assert not is_seeded_run(None), "an unstamped row is a live row, not a seeded one"
 
 
 def test_tool_call_rejected_matches_backticked_tool_name_form(tmp_path) -> None:
