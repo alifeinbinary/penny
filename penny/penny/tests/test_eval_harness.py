@@ -17,6 +17,7 @@ check`` rather than only on the ``eval``-marked run the marker deselects.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -30,6 +31,7 @@ from penny.database.skills import SkillParameter
 from penny.llm.models import LlmMessage, LlmToolCall, LlmToolCallFunction
 from penny.prompts import Prompt
 from penny.skill_extraction import build_framing_content
+from penny.tests.conftest import TEST_SENDER
 from penny.tests.eval import report
 from penny.tests.eval.artifacts import (
     CaseArtifact,
@@ -72,11 +74,18 @@ from penny.tests.eval.test_skill_framing import FIXTURES as FRAMING_FIXTURES
 from penny.tests.eval.test_skill_labelling import FIXTURES as LABELLING_FIXTURES
 from penny.tests.eval.test_state_transitions import (
     APPLY_CASES,
+    IDLE_APPLY_CASES,
+    JOURNEY_CONFIRMATIONS,
+    LAST_SPOKEN_TURNS,
     _interface_check,
+    _overlaps,
+    assert_composed_world,
+    assert_new_space_is_unknown,
     assert_round_cites_its_run,
     assert_seeded_ledger,
     cadence_seconds,
     rule_parts,
+    seed_composed_world,
     seed_learned_round,
 )
 from penny.tests.schema_template import migrated_db, schema_only_db
@@ -234,6 +243,74 @@ def test_every_apply_case_seeds_a_round_that_cites_its_own_run(tmp_path) -> None
         seed_learned_round(case)(db)
         assert_seeded_ledger(db, case)
         assert_round_cites_its_run(db, case)
+
+
+def test_the_idle_world_seeds_five_finished_journeys_and_lands_idle(tmp_path) -> None:
+    """The idle → apply cases share ONE composed world — five journeys walked to their
+    end, the five jobs they left running, and a stretch of small talk after them.  A
+    seeder that raises fails five cases at once, and a seeder that quietly drifts makes
+    all five of them turns answered against a world nothing produces.
+
+    Driven here against a real migrated database, with the seeder's own loud probe: the
+    machine idle and unanchored, five live jobs, every round readable under its own run,
+    and the small talk logged both ways.  Each case's novelty claim rides along — the
+    values its ask supplies appear NOWHERE in that history, which is the whole basis of
+    the "bound from the message" check.  The registry probe stays out, exactly as it does
+    for the learn → apply pin: the harness seeds fixture skills after the case's seed."""
+    db = migrated_db(str(tmp_path / "composed-idle.db"))
+    seed_composed_world()(db)
+    assert_composed_world(db)
+    for case in IDLE_APPLY_CASES:
+        assert_new_space_is_unknown(db, case)
+
+
+def test_a_parameter_binds_on_any_value_that_locates_the_expected_one() -> None:
+    """A bound parameter matches its expected phrase by OVERLAP in either direction
+    (code-owner ruling) — so every spelling that locates the same thing passes, and an
+    unrelated value still fails.
+
+    The measured case: told to watch for the dawn sailing, a routine bound to `dawn` finds
+    exactly the line `dawn sailing` would, and one-way containment scored that a binding
+    failure when it is a wording preference.  Pinned here rather than on a GPU because the
+    matcher is pure — and because what it must still REFUSE is the half that would quietly
+    stop meaning anything."""
+    expected = "dawn sailing"
+    for value in ("dawn", "Dawn", "dawn sailing", "Dawn Sailing", "the dawn sailing line"):
+        assert _overlaps(expected, [value]), f"{value!r} locates the dawn sailing"
+    for value in ("late sailing", "timetable", "north pier"):
+        assert not _overlaps(expected, [value]), f"{value!r} locates something else"
+    assert not _overlaps(expected, []), "a routine that bound nothing matches nothing"
+    for empty in ("", "   "):
+        assert not _overlaps(expected, [empty]), "an empty value is evidence of nothing"
+    assert _overlaps(expected, ["north pier", "dawn"]), "one bound value is enough"
+
+
+def test_the_idle_worlds_window_carries_pennys_turns_in_order(tmp_path) -> None:
+    """Penny's side of the seeded history reaches the CONVERSATION, not just the record.
+
+    ``get_messages_since`` — what ``_build_conversation`` reads — takes the incoming
+    messages plus Penny's replies TO THOSE MESSAGES, matched by ``parent_id``, plus
+    autonomous sends (which carry no parent). An unthreaded outgoing row satisfies neither
+    leg, so it is logged and invisible: the window comes back all-user and the same-role
+    merge folds the whole history into ONE giant user turn. That is what the first live run
+    of these cases answered — nineteen turns stacked into one message reading as a pile of
+    unanswered requests — so the threading is pinned here rather than rediscovered on a GPU.
+
+    The exhaustive turn-for-turn equality is ``assert_composed_world``'s; what this adds is
+    the two claims a reader of the case cares about — every journey's confirmation is an
+    ASSISTANT turn, in journey order, and the small talk is what the window ends on."""
+    db = migrated_db(str(tmp_path / "composed-window.db"))
+    seed_composed_world()(db)
+    window = db.messages.get_messages_since(TEST_SENDER, since=datetime.min, limit=200)
+    assistant = [
+        row.content for row in window if row.direction == PennyConstants.MessageDirection.OUTGOING
+    ]
+    confirmations = [line for line in assistant if line in JOURNEY_CONFIRMATIONS]
+    assert confirmations == list(JOURNEY_CONFIRMATIONS), (
+        f"every apply confirmation is an assistant turn, in order — got {confirmations}"
+    )
+    tail = [(row.direction, row.content) for row in window[-len(LAST_SPOKEN_TURNS) :]]
+    assert tail == list(LAST_SPOKEN_TURNS), f"the window must end on the small talk, got {tail}"
 
 
 def test_a_seeded_prior_turn_is_not_read_as_this_samples_work(tmp_path) -> None:
