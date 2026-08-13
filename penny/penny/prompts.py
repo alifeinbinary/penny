@@ -133,11 +133,26 @@ class Prompt:
         "there, so there is nothing to set up.\n\n"
     )
 
+    # APPLY's instruction NAMES the round it is standing up (#1869/#1875): the container the
+    # round built and the routine it taught are rendered VERBATIM inside the instruction
+    # itself, so the collection the turn configures is a name it copies rather than one it
+    # works out, and the routine and the values it is pointed at are stated as settled
+    # rather than asked for.  There is no unframed form of this instruction and no unframed
+    # apply turn: a round that reaches apply with no framing has nothing to configure, and
+    # the turn fails honestly in python before a prompt is composed at all.
+    #
+    # It opens with the STATE — a collection exists, this is what it is called, this is what
+    # it runs — and asks for the one thing left, the job's own terms (when it runs, when it
+    # stops, whether to tell them).  Those terms are named as the job's, never as argument
+    # names: a routine is an arbitrary sequence of tool calls, and the terms are the part of
+    # a job that is never one of its steps.  What it does NOT carry is an end-date rule; that
+    # lives with the field it governs, on `expires_at`'s own description.
     APPLY_INSTRUCTION = (
-        "A skill you already know does what the user is asking, and their message "
-        "contains all the information for its parameters. Set it up now, in one "
-        "`collection_set` call, binding what they told you. Do not set an end date "
-        "unless they gave one.\n\n"
+        "A collection has been set up for this task from what the user asked. It is "
+        "named `{container}`, it runs the routine `{skill}`, and it is already pointed "
+        "at what they gave. Configure its schedule now, in one `collection_set` call on "
+        "`{container}`: when it runs, when it stops if they gave an end, and whether to "
+        "tell them — all from the user's own words.\n\n"
         "Configuring it is the whole turn — you are not carrying the routine out "
         "yourself. Once it is set up it runs itself on the schedule they just "
         "gave you, and its first run is the first thing they'll hear about.\n\n"
@@ -284,6 +299,24 @@ class Prompt:
         "just this one instance), say plainly what it does, and name what you'd need "
         "from them to run it again. Then offer to set it running on a schedule if "
         "they'd like."
+    )
+
+    # Injected as a user turn after a chat run that just CONFIGURED the round's routine
+    # (#1869) — the applied-configuration sibling of SKILL_LEARNED_NARRATION above, and it
+    # exists for the same reason that one does, one step further along: the turn no longer
+    # supplies the routine or the values it is pointed at (the round settled both, and the
+    # framework supplied them at the call), so what is now running is something the model
+    # has to READ rather than remember.  ``{configuration}`` is the record the store holds
+    # — cadence, end condition, notify, and what it is pointed at — so SAID==DID holds by
+    # construction.  Deliberately not the rendered program, for SKILL_LEARNED_NARRATION's
+    # own reason (#1799): a block of tool calls in front of this request is a block that
+    # gets read aloud.
+    CONFIGURATION_APPLIED_NARRATION = (
+        "The routine is now set up, and here is exactly what was configured:\n\n"
+        "{configuration}\n\n"
+        "Reply to the user now. Tell them in your own words what is running: what it "
+        "watches, how often it runs, when it stops if it stops, and whether they will "
+        "hear from it. Say only what is above — anything not there was not set."
     )
 
     # Returned (in the tool-result field, success=False) when a collector calls

@@ -31,13 +31,17 @@ from penny.skill_extraction import (
 from penny.text_validity import is_call_as_text_bail, is_call_fragment_reply
 from penny.tools import Tool
 from penny.tools.browse import BrowseTool
+from penny.tools.collection_instantiation import render_applied_configuration
 from penny.tools.generate_image import GenerateImageTool
-from penny.tools.memory_tools import collector_tool_surface
+from penny.tools.memory_tools import CollectionSetTool, collector_tool_surface
 from penny.tools.notifications import NotificationsMuteTool, NotificationsUnmuteTool
 from penny.tools.skill_tools import render_skill_brief
 from penny.validation import ConditionKey
 from penny.validation.outcomes import LoopContext
-from penny.validation.response_validators import SkillNarrationValidator
+from penny.validation.response_validators import (
+    AppliedConfigurationValidator,
+    SkillNarrationValidator,
+)
 
 if TYPE_CHECKING:
     from penny.llm.image_client import OllamaImageClient
@@ -72,7 +76,10 @@ class ChatAgent(Agent):
     #  - SkillNarrationValidator: on a run that just auto-extracted a skill (#1658),
     #    nudge the model to tell the user what it learned FROM the rendered frame the
     #    text-branch prep stamped on the ctx (SAID==DID).
-    run_shape_validators = [SkillNarrationValidator()]
+    #  - AppliedConfigurationValidator: on a run that just configured the round's routine
+    #    (#1869), the same move for what is now RUNNING — the turn supplied only the terms,
+    #    so the routine and what it watches are read off the record rather than recalled.
+    run_shape_validators = [SkillNarrationValidator(), AppliedConfigurationValidator()]
 
     # Chat's invalid draws are CALL-SHAPED TEXT ONLY (#1839): a plain conversational
     # reply IS chat's valid terminal state, so nothing about ordinary prose is
@@ -174,6 +181,22 @@ class ChatAgent(Agent):
         tools.extend(self._plugin_tools)
         return tools
 
+    def _configuring_round(self) -> RoundFraming | None:
+        """The round this turn is CONFIGURING (#1869) — the framing on an APPLY turn.
+
+        Keyed to the state for the same reason the prompt's own round line is: apply is
+        the state that stands the routine up, so it is the state whose ``collection_set``
+        carries only the terms.  The framing is carried past learn (a learn turn holds one
+        too), and a learn turn that configured anything would be a learn turn doing the
+        next turn's job — so what it holds is not what this hook is about.
+
+        The value is the turn's own parameters, held for the span of the turn exactly as
+        ``_current_message`` is (both are the channel's decisions passed down, and both
+        are read by machinery several frames below ``handle``)."""
+        if self._turn_state is not ConversationState.APPLY:
+            return None
+        return self._turn_framing
+
     def _email_tools(self) -> list[Tool]:
         """Config-gated email tools, built fresh for this turn.
 
@@ -204,18 +227,59 @@ class ChatAgent(Agent):
         qualifying run, stamp the learned skill's rendered frame onto the ctx so the
         ``SkillNarrationValidator`` narrates it in the same turn.
 
-        Extraction runs at most once per run (``_extraction_run_id``): the first
-        final text extracts + narrates; the model's post-narration re-reply finds the
-        run already attempted and falls through to the real final answer.  A
-        non-qualifying run stamps nothing (the ctx passes through unchanged) — which,
-        since #1850, is every turn the machine did not call a learn turn."""
+        The apply turn's sibling (#1869) is stamped in the same place: a run that
+        CONFIGURED the round's routine carries the record of what is now running, since
+        that turn supplied only the job's terms and the rest was filled in for it.
+
+        The prep runs at most once per run (``_extraction_run_id``): the first final text
+        stamps its frames; the model's post-narration re-reply finds the run already
+        prepared and falls through to the real final answer.  A run that neither learned
+        nor configured anything stamps nothing (the ctx passes through unchanged) —
+        which, since #1850, is every turn the machine did not call a learn turn and did
+        not stand a framed round up."""
         if run_id == self._extraction_run_id:
             return ctx
         self._extraction_run_id = run_id
-        frame = await self._extract_and_frame_skill(run_id, self._turn_state, self._turn_framing)
-        if frame is None:
+        learned = await self._extract_and_frame_skill(run_id, self._turn_state, self._turn_framing)
+        configured = self._applied_configuration_frame(ctx)
+        if learned is None and configured is None:
             return ctx
-        return ctx.model_copy(update={"learned_skill_frame": frame})
+        return ctx.model_copy(
+            update={"learned_skill_frame": learned, "applied_configuration_frame": configured}
+        )
+
+    def _applied_configuration_frame(self, ctx: LoopContext) -> str | None:
+        """The record of what this turn CONFIGURED, rendered for the narration frame
+        (#1869) — ``None`` when the turn configured nothing.
+
+        Two things have to be true, and both are READS rather than judgments: the turn was
+        standing this round's routine up, and a ``collection_set`` call actually landed
+        this run.  The record itself is the container's own row, which is where the
+        routine, its bound values and the job's terms were written — so a turn that
+        supplied only the terms narrates the whole configuration from the store rather
+        than from arguments the framework filled in on its behalf.
+
+        A container with no routine on it renders nothing: an inert collection has no
+        configuration to state, and claiming one would be the honest-failure rule broken
+        from the other side."""
+        framing = self._configuring_round()
+        if framing is None or not self._set_a_collection(ctx):
+            return None
+        row = self.db.memories.get(framing.container)
+        configuration = render_applied_configuration(row) if row is not None else None
+        if configuration is None:
+            return None
+        return Prompt.CONFIGURATION_APPLIED_NARRATION.format(configuration=configuration)
+
+    @staticmethod
+    def _set_a_collection(ctx: LoopContext) -> bool:
+        """Whether a ``collection_set`` call succeeded this run — the structural "did this
+        turn configure anything" read, off the run's own call records rather than off the
+        durable row (which would also read TRUE for a job configured on some earlier
+        turn)."""
+        return any(
+            record.tool == CollectionSetTool.name and not record.failed for record in ctx.records
+        )
 
     async def _extract_and_frame_skill(
         self,
@@ -322,6 +386,8 @@ class ChatAgent(Agent):
                 )
 
             logger.info("Handling message from %s (conversation mode)", sender)
+            if (unconfigurable := self._unconfigurable_round(state, framing)) is not None:
+                return unconfigurable
             self._install_tools(self.get_tools(run_id=run_id))
             # The machine decided this turn's state before the turn began, so the
             # prompt carries THAT state's single instruction (#1706).  ``None`` —
@@ -349,6 +415,37 @@ class ChatAgent(Agent):
             self._current_message = None
             self._turn_state = None
             self._turn_framing = None
+
+    @staticmethod
+    def _unconfigurable_round(
+        state: ConversationState | None, framing: RoundFraming | None
+    ) -> ControllerResponse | None:
+        """An apply turn that arrived with no framing FAILED before it began (#1875) —
+        ``None`` on every other turn, which is the ordinary path untouched.
+
+        Apply configures the collection its own round set up: the container, the routine
+        and the values it is pointed at are all supplied framework-side, and the turn says
+        only the job's terms.  With no framing there is no container to configure, no
+        routine to name, and nothing the turn could truthfully report — so it ends here,
+        in python, with an honest reply and no model call at all (#1839's shape, moved to
+        the front of the turn because there is nothing to run rather than nothing learned).
+
+        The two things it must NOT do are what makes this a failure rather than a
+        fallback: instructing the turn as though it were binding the routine itself would
+        have it re-derive values it cannot see, and offering the full ``collection_set``
+        surface would have it invent a collection for a job the round never settled.  The
+        machine is left where it stands, so the user's retry is an ordinary next message.
+
+        Checked on the conversation branch, which is where both of those live: a vision
+        turn composes no state instruction and installs no tools, so it can neither be
+        instructed to bind a routine nor claim to have configured one, and answering an
+        image with a setup failure would be a worse reply than the caption it can give."""
+        if state is not ConversationState.APPLY or framing is not None:
+            return None
+        logger.warning(
+            "Apply turn arrived with no framing — nothing to configure, replying honestly"
+        )
+        return ControllerResponse(answer=PennyResponse.APPLY_NOTHING_TO_CONFIGURE)
 
     def _enforce_learn_terminal(
         self, state: ConversationState | None, response: ControllerResponse, run_id: str
