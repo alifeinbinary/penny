@@ -14,7 +14,7 @@ wordings against one world, with its facts held constant across the arms.
 | recall, from the store | ``memory-cold-recall`` | the fact exists ONLY in the store |
 | recall, across the store | ``memory-recall-across-the-store`` | a different sentence — see below |
 | forget | ``memory-forget-then-list`` | the only ask that owes the report half |
-| update | ``memory-change-a-note`` | a pure edit, no lookup folded into it |
+| update | ``memory-change-lands-on-the-entry-that-exists`` | the edit lands on the entry |
 | fan-out | ``memory-a-like-and-a-dislike`` | the slot's only candidate |
 | no-fire | ``memory-no-fire-narration`` | the mention with nothing in the store to match it |
 | no-fire | ``memory-no-fire-wistful`` | the mention with a matching collection sitting there |
@@ -37,6 +37,12 @@ answers differently for each pair:
 
 So recall is two cases, not one with three worlds.  Splitting a behaviour in two is a smaller
 mistake than collapsing two into one; the pair is named together here.
+
+**UPDATE IS ONE CASE.**  ``memory-change-lands-on-the-entry-that-exists`` is an edit to an
+entry the user names differently from the key it is stored under: the recipe is kept as
+``Sheet-pan chicken fajitas`` and asked about as *my fajitas recipe*.  The change is made ON
+that entry rather than beside it as a second fajitas recipe, and the edit adds to the recipe,
+so what the entry already held is still there afterwards.
 
 **THE NO-FIRE DIRECTION IS TWO CASES OF ITS OWN** (#2100).  The ruling: one case is one
 setup, one run, one set of assertions, and where a behaviour's positive and negative
@@ -112,6 +118,7 @@ from penny.tests.eval.utils.cohort import (
     TRANSITIONS,
     SampleObservation,
     SpecCategory,
+    StoredEntry,
     fold_typography,
 )
 
@@ -160,6 +167,19 @@ _AVOID = SynthCollection(
     entries=("loud offices — can't focus in them",),
 )
 
+# The recipe box the update edits.  Its first entry is keyed
+# ``Sheet-pan chicken fajitas`` — the text before the em dash — and no wording of that case says
+# the key verbatim.
+_RECIPE_BOX = SynthCollection(
+    "recipe-box",
+    "Saved quick weeknight dinner recipes: short ingredient lists and fast cook times.",
+    entries=(
+        "Sheet-pan chicken fajitas — peppers, onion, chicken, 25 min at 425F.",
+        "One-pot lemon orzo — orzo, lemon, spinach, parmesan, 20 min.",
+    ),
+)
+_FAJITAS_KEY = _RECIPE_BOX.keyed[0][0]
+
 _GEAR_PRICE_KEY = "aurora deck 2 price"
 _GEAR_PRICE = "$499"
 
@@ -186,17 +206,17 @@ _SUBJECT = "mistforge"  # the game the lookup story is about
 _PRICE = "499"  # the figure the cold recall has to state
 _AVOIDED = "office"  # the one thing the avoid list already holds
 _INTO_ANCHOR = "chess"  # the note the into-list holds in every world that seeds it
-_EDITED = "hiking"  # the note the update story names
+_KEPT_NOTE = "hiking"  # a note the forget story leaves in place
 _DROPPED = "jazz"  # the note the forget story names
-_NEW_WORDING = "alpine"  # what the edited note must say afterwards
 _LIKE = "bouldering"  # the enthusiasm the fan-out story files
 _DISLIKE = "coffee"  # the complaint it files somewhere else
+_MARINADE = "lime"  # what the update adds to the recipe
+_RECIPE_KEPT = "425"  # what that recipe already said, which adding to it must not lose
 
-# What each edit must leave exactly as it was — the seeded notes it did not name.  Derived from
-# the three above rather than listed again, so a case can never claim a note is untouched while
-# naming that same note as the one to change.
-_FORGET_KEPT = (_INTO_ANCHOR, _EDITED)
-_UPDATE_KEPT = (_INTO_ANCHOR, _DROPPED)
+# What the forget must leave exactly as it was — the seeded notes it did not name.  Derived from
+# the tokens above rather than listed again, so the case can never claim a note is untouched
+# while naming that same note as the one to drop.
+_FORGET_KEPT = (_INTO_ANCHOR, _KEPT_NOTE)
 
 # What a correct REPLY must name, which is not the same token set the store claims read.  The
 # store holds the seeded text verbatim, so a claim about it can name the whole word; the reply
@@ -206,6 +226,13 @@ _UPDATE_KEPT = (_INTO_ANCHOR, _DROPPED)
 # it is still the SMALLEST unique one: no other seeded name, description or entry in any of
 # these worlds contains ``hik``.
 _FORGET_ANSWERS = (_INTO_ANCHOR, "hik")
+
+# The recipes the update does NOT name, with what each was seeded with —
+# derived from the box rather than listed again, so the case can never claim a recipe is
+# untouched while naming that same recipe as the one to change.
+_RECIPES_NOT_NAMED = tuple(
+    (key, content) for key, content in _RECIPE_BOX.keyed if key != _FAJITAS_KEY
+)
 
 
 # ── The case shape ───────────────────────────────────────────────────────────
@@ -224,7 +251,11 @@ class _VerbCase(NamedTuple):
     before the turn runs: what each collection must already carry, which must start empty, and
     which tokens must appear nowhere in the store.  Every one of them is the precondition of a
     claim below — ``withholds`` most of all, because a token already in the store would make
-    the claim that names it pass without the turn doing anything."""
+    the claim that names it pass without the turn doing anything.
+
+    ``unspoken`` is a premise about the WORDINGS rather than the store: each is a key the store
+    holds that no wording may say verbatim.  A case about finding an entry under a key the user
+    never says measures nothing the day one of its wordings says it."""
 
     case_id: str
     behaviour: str
@@ -234,6 +265,7 @@ class _VerbCase(NamedTuple):
     holds: tuple[tuple[str, tuple[str, ...]], ...] = ()
     empty: tuple[str, ...] = ()
     withholds: tuple[str, ...] = ()
+    unspoken: tuple[tuple[str, str], ...] = ()
 
 
 def _collection_text(db: Database, name: str) -> str:
@@ -275,6 +307,19 @@ def probe_seeded_world(db: Database, case: _VerbCase) -> None:
         assert token not in everywhere, (
             f"{case.case_id}: nothing may hold {token!r} before the turn, or the claim that "
             f"names it passes without the turn acting — the store holds {everywhere!r}"
+        )
+    _probe_unspoken(db, case)
+
+
+def _probe_unspoken(db: Database, case: _VerbCase) -> None:
+    """Each unspoken key is one the store really holds, and one no wording says verbatim."""
+    wordings = [fold_typography(wording) for wording in (case.ask, *case.also_phrased)]
+    for name, key in case.unspoken:
+        keys = sorted(collection_entries(db, name))
+        assert key in keys, f"{case.case_id}: {name!r} must hold the key {key!r} — it holds {keys}"
+        spoken = [wording for wording in wordings if fold_typography(key) in wording]
+        assert not spoken, (
+            f"{case.case_id}: no wording may say the stored key {key!r} verbatim — {spoken}"
         )
 
 
@@ -333,7 +378,7 @@ _MEASURED = (TOOL_SEQUENCE, ENTRIES_STORED, TRANSITIONS, REPLY_SPREAD)
 # keyed to ``collection_delete_entry`` would simply not fire for a plugin verb nobody enumerated.
 #
 # They stay LOCAL rather than graduating into ``assertions.py``.  A claim graduates at the second
-# CUSTOMER, and the six cases below are one behaviour family in one file: a second FILE asking
+# CUSTOMER, and the cases below are one behaviour family in one file: a second FILE asking
 # one of these questions is what would make it shared, and no other slot has asked yet.
 
 _ClaimFn = Callable[[SampleObservation, World], Answer]
@@ -406,16 +451,60 @@ def _no_longer_holds(collection: str, token: str) -> _ClaimFn:
     return answer
 
 
-def _holds_exactly(collection: str, count: int) -> _ClaimFn:
-    """The collection holds the number of entries it started with — an edit landed IN the note
-    it was told to change rather than beside it.
+def _held_keys(sample: SampleObservation, collection: str) -> list[str]:
+    """Every key one collection holds as the sample left it, sorted."""
+    return sorted(entry.key or "" for entry in sample.held if entry.collection == collection)
 
-    A violating sample is nameable: one that writes the new wording as a fourth note and leaves
-    the third standing, which is the exact defect this behaviour is named for."""
+
+def _entry_under(sample: SampleObservation, collection: str, key: str) -> StoredEntry | None:
+    """The entry the collection holds under exactly ``key``, as the sample left it."""
+    return next(
+        (entry for entry in sample.held if entry.collection == collection and entry.key == key),
+        None,
+    )
+
+
+def _the_entry_carries(collection: str, key: str, token: str) -> _ClaimFn:
+    """The entry that was already there, under the key it was stored under, carries a fact —
+    read over the WHOLE entry, key and content.
+
+    Keyed to the stored key rather than to "some entry mentions it", because the claim is about
+    WHICH entry the change landed on: the same fact written into a second entry beside it
+    leaves this one without it.  A violating sample is nameable — the entry gone, or still
+    carrying only what it carried before."""
 
     def answer(sample: SampleObservation, _world: World) -> Answer:
-        keys = sorted(entry.key or "" for entry in sample.held if entry.collection == collection)
-        return len(keys) == count, f"{collection} holds {len(keys)}: {keys}"
+        entry = _entry_under(sample, collection, key)
+        if entry is None:
+            held = _held_keys(sample, collection)
+            return False, f"no entry under {key!r}; {collection} holds {held}"
+        text = fold_typography(entry.text)
+        return token in text, f"{key!r} holds {text!r}"
+
+    return answer
+
+
+def _holds_the_keys(collection: str, keys: tuple[str, ...]) -> _ClaimFn:
+    """The collection holds exactly the keys it started with — a change landed ON an entry,
+    not beside it.
+
+    Set equality rather than a count, so a sample that dropped one recipe and filed the change
+    as a new one is named for both halves of what it did."""
+
+    def answer(sample: SampleObservation, _world: World) -> Answer:
+        held = _held_keys(sample, collection)
+        return held == sorted(keys), f"{collection} holds {held}"
+
+    return answer
+
+
+def _the_entry_is_unchanged(collection: str, key: str, content: str) -> _ClaimFn:
+    """An entry the ask did not name holds exactly what it was seeded with."""
+
+    def answer(sample: SampleObservation, _world: World) -> Answer:
+        entry = _entry_under(sample, collection, key)
+        held = None if entry is None else entry.content
+        return held == content, f"{key!r} holds {held!r}"
 
     return answer
 
@@ -779,67 +868,76 @@ async def test_forgetting_then_reporting_names_what_is_left(
 
 # ═══ update ══════════════════════════════════════════════════════════════════
 #
-# The note already exists, so the new wording belongs IN it.  No page is installed: the new
-# wording comes out of the user's own message, which is what makes "she edited the note" a claim
-# about the store rather than about a lookup.
+# The recipe is stored under ``Sheet-pan chicken fajitas`` and the user calls it their fajitas
+# recipe, so the key the change belongs under is one the user never says.  Nothing is forced:
+# how the model finds the entry and which verb lands the change are the route, measured by
+# ``TOOL_SEQUENCE``.  What is claimed is where the change ended up, and that what the recipe
+# already held is still on it.
 
 _UPDATE = _VerbCase(
-    case_id="memory-change-a-note",
+    case_id="memory-change-lands-on-the-entry-that-exists",
     behaviour=(
-        "In the chat agent, when the user says a note they already have should now say something "
-        "else, Penny rewrites that note in place — the list neither grows nor loses anything."
+        "In the chat agent, when the user asks her to change a note she keeps under a key "
+        "worded differently from how the user names it, Penny finds the entry that exists and "
+        "records the change on it, and the list holds the same entries it started with."
     ),
-    # ``answers`` is EMPTY: the ask is an instruction, so "done — your hiking note says alpine
-    # trails now" and a bare "done" are both correct, and requiring a token would fail the second
-    # for something nobody requested.
-    world=World(name="one list", pages=(), keeps=(), excludes=(), stores=(_INTO,)),
-    ask="change my hiking note to say I prefer alpine trails",
+    # ``answers`` is EMPTY: the ask is an instruction, so a bare "done" answers it, and
+    # requiring a token would fail a correct run for something nobody requested.  No pages: the
+    # change comes out of the user's own message.
+    world=World(name="recipe box", pages=(), keeps=(), excludes=(), stores=(_RECIPE_BOX,)),
+    ask="add a 10-minute lime marinade to my fajitas recipe",
     also_phrased=(
-        "update my hiking note — i prefer alpine trails",
-        "edit the hiking note to say i prefer alpine trails",
-        "my hiking note should say i prefer alpine trails now",
-        "rewrite my hiking note so it says i prefer alpine trails",
+        "can you update my fajitas recipe so the chicken gets a 10-minute lime marinade first?",
+        "my fajita recipe needs a 10-minute lime marinade added to it",
+        "put a 10-minute lime marinade step into the fajitas recipe i saved",
+        "for the fajitas recipe, add that it marinates in lime for 10 minutes before cooking",
     ),
-    holds=((_INTO.name, (*_UPDATE_KEPT, _EDITED)),),
-    withholds=(_NEW_WORDING,),
+    holds=((_RECIPE_BOX.name, ("fajitas", "orzo", _RECIPE_KEPT)),),
+    withholds=(_MARINADE,),
+    unspoken=((_RECIPE_BOX.name, _FAJITAS_KEY),),
 )
 
 
 @pytest.mark.parametrize("model", EVAL_MODELS)
-async def test_changing_a_note_rewrites_only_that_note(chat_eval: ChatEval, model: str) -> None:
-    """One note is rewritten with what the user now says, and the list neither grows nor loses
-    anything else."""
+async def test_a_change_lands_on_the_entry_that_exists(chat_eval: ChatEval, model: str) -> None:
+    """The user names a recipe by a shorter name than the key it is stored under, and the
+    change lands on that recipe rather than beside it."""
     cohort = await _drive(chat_eval, model, _UPDATE)
     # LANDED
     cohort.assert_machine_landed(ConversationState.IDLE)
 
-    # STORE
+    # STORE — the change is on the entry that was already there, that entry still carries the
+    # temperature it held, the box holds the recipes it started with, and the recipe nobody
+    # named is exactly as it was.
     cohort.claim(
-        "state: the list now says the new thing",
-        _holds(_INTO.name, _NEW_WORDING),
+        "state: the recipe the box already had now carries the marinade",
+        _the_entry_carries(_RECIPE_BOX.name, _FAJITAS_KEY, _MARINADE),
         SpecCategory.STORE,
     )
     cohort.claim(
-        # The count comes off the SEED rather than being typed out, so a fixture that grows a
-        # fourth note cannot leave this claim quietly asserting the old shape.
-        "state: the list holds the notes it started with (rewritten in place, not added beside)",
-        _holds_exactly(_INTO.name, len(_INTO.entries)),
+        "state: that recipe still carries the 425F it held",
+        _the_entry_carries(_RECIPE_BOX.name, _FAJITAS_KEY, _RECIPE_KEPT),
         SpecCategory.STORE,
     )
-    for token in _UPDATE_KEPT:
+    cohort.claim(
+        "state: the box holds exactly the recipes it started with (changed on, not beside)",
+        _holds_the_keys(_RECIPE_BOX.name, tuple(key for key, _ in _RECIPE_BOX.keyed)),
+        SpecCategory.STORE,
+    )
+    for key, content in _RECIPES_NOT_NAMED:
         cohort.claim(
-            f"state: the {token!r} note is still there",
-            _holds(_INTO.name, token),
+            f"state: the {key!r} recipe is unchanged",
+            _the_entry_is_unchanged(_RECIPE_BOX.name, key, content),
             SpecCategory.STORE,
         )
     cohort.claim(
-        "state: the list itself is still the one she was given",
-        _the_list_itself_survived(_INTO.name),
+        "state: the box itself is still the one she was given",
+        _the_list_itself_survived(_RECIPE_BOX.name),
         SpecCategory.STORE,
     )
 
-    # PROVENANCE — the new wording is the user's own, so a note that came back carrying a trail
-    # name, a distance or a season nobody said was invented into the store for good.
+    # PROVENANCE — the marinade is the user's own detail, so a recipe that came back carrying a
+    # time, a temperature or an ingredient nobody said was invented into the store for good.
     cohort.assert_every_value_in_the_store_is_sourced()
     cohort.assert_every_value_in_the_reply_is_sourced()
 
