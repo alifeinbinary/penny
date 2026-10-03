@@ -38,6 +38,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from functools import lru_cache
 
@@ -125,6 +126,14 @@ class MechanismRecord(BaseModel):
     it, read because claims name those VALUES — which way the switch is set, which hour the rule
     fires at, whether the job still has a program to run — questions the ledger cannot answer,
     since it says what moved and never where it landed.
+
+    ``expires`` is whether the row carries an end condition at all — the third TERM a turn that
+    stands a job up commits to, beside the schedule it fires on and whether it tells the user.
+
+    ``expires_at``, ``max_runs`` and ``created_at`` are what a claim about WHEN the job stops
+    reads: the two columns an end is stored in, and the creation moment a rule with no start
+    of its own is anchored at.  They travel as stored, so the reading — on the user's clock —
+    is ``job_end``'s.
     """
 
     name: str
@@ -135,6 +144,10 @@ class MechanismRecord(BaseModel):
     notifies: bool
     schedule: str | None
     program: str | None
+    expires: bool
+    expires_at: datetime | None = None
+    max_runs: int | None = None
+    created_at: datetime | None = None
 
     @property
     def changed_this_run(self) -> bool:
@@ -228,6 +241,22 @@ class SampleObservation(BaseModel):
     complete: bool = True
     exclusion: str | None = None
     landed: str | None = None
+    # The routine the move NAMED, off the landed transition's own ``skill_name`` — which
+    # routine the decision recognised as covering the ask, before anything was stood up.
+    # Beside ``landed`` because it is the same row and the same reading: where the machine
+    # went, and what it went there about.  ``None`` where the move named none, which is a
+    # real reading (an ordinary chat turn names no routine) and not a missing one.
+    decision_skill: str | None = None
+    # WHEN the landed move was recorded, and the timezone the user's profile carries — the
+    # two facts a claim about a job's end is read against, since an ask states its end on the
+    # user's own clock ("tonight", "sunday night") relative to the turn that carried it.
+    turn_at: datetime | None = None
+    timezone: str | None = None
+    # The parameters the round is still WAITING ON, off the landed transition's own
+    # ``round_shortfall`` — their declared names, in the routine's declared order.  Empty
+    # where the move recorded no shortfall, which is the ordinary reading (only a move landing
+    # in request carries one) and not a missing one.
+    awaiting: list[str] = Field(default_factory=list)
     # The ordered moves this sample's driver walked, in the VOCABULARY of the observer that
     # read it: a chat sample carries the conversation machine's own walk (``idle→learn,
     # learn→apply``, or ``no move`` when it recorded none), a collector sample the ordered
@@ -251,6 +280,11 @@ class SampleObservation(BaseModel):
     # WHICH rows are read is the fixture's, like every other observation: a chat sample
     # reads every collection, a collector cycle reads the one container its job is bound to.
     held: list[StoredEntry] = Field(default_factory=list)
+    # Every entry the store held when the sample's measured turn BEGAN — ``held`` read at the
+    # other end of the turn, which is what makes "what the store already held survives" a read
+    # rather than an inference.  The end state alone cannot answer it: an entry the turn
+    # deleted or rewrote leaves no trace in ``held``, only an absence.
+    held_before: list[StoredEntry] = Field(default_factory=list)
     # Every MECHANISM the registry holds when the sample ends, archived ones included — what
     # a round's own cleanup and a running job's survival are both read off.  Beside ``held``
     # rather than derived from it, because they answer different questions about the same
