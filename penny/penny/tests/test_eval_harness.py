@@ -167,7 +167,11 @@ from penny.tests.eval.chat.idle.test_image_dispatch import (
     drew,
     install_image_client,
 )
-from penny.tests.eval.chat.idle.test_notifications import assert_mute_world
+from penny.tests.eval.chat.idle.test_notifications import (
+    assert_mute_world,
+    assert_unmute_world,
+    seed_muted,
+)
 from penny.tests.eval.chat.idle.test_notifications import (
     assert_no_fire_world as assert_mute_no_fire_world,
 )
@@ -1549,7 +1553,7 @@ def test_every_standing_operation_is_answered_against_the_job_it_claims(tmp_path
     for index, case in enumerate(OPERATION_CASES):
         _assert_one_ask_in_five_wordings(case.case_id, case.ask, case.also_phrased)
         db = migrated_db(str(tmp_path / f"standing-{index}.db"))
-        seed_standing_jobs(case.job)(db)
+        seed_standing_jobs(*case.jobs)(db)
         assert_the_operation_world(db, case)
 
 
@@ -1925,6 +1929,10 @@ async def test_each_dispatch_probe_accepts_the_world_its_own_hook_stands_up(
         assert_choose_world(penny)
         assert_mute_world(penny)
         assert_mute_no_fire_world(penny)
+        # The unmute case's world is the same one with the switch thrown, so it is probed
+        # last: its seed is the one thing here that changes what the others stand on.
+        seed_muted(penny.db)
+        assert_unmute_world(penny)
 
 
 async def test_the_drawn_image_claim_reads_what_the_real_tool_stored(
