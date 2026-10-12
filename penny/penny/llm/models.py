@@ -243,8 +243,19 @@ class LlmMessage(BaseModel):
     thinking: str | None = None
 
     def to_input_message(self) -> dict[str, Any]:
-        """Convert to input message format for the next request (excludes thinking)."""
+        """Convert to input message format for the next request.
+
+        Carries the step's thinking as ``reasoning``, so the next step of the same turn
+        is drawn with it in view.  A plan made before the first call ("read the page,
+        then write it down") is otherwise gone by the time the result comes back, and
+        the step after a tool result is then decided without it.
+
+        It rides only on the messages of the turn in flight: the next turn's history is
+        built from the message log, which holds what was said and never what was
+        thought, so nothing here crosses turns."""
         message: dict[str, Any] = {"role": self.role, "content": self.content}
+        if self.thinking:
+            message["reasoning"] = self.thinking
         if self.tool_calls:
             message["tool_calls"] = [
                 {
