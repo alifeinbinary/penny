@@ -84,7 +84,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
-from similarity.embeddings import cosine_similarity
+from similarity.embeddings import cosine_similarity, is_name_variant
 
 from penny.config_params import RuntimeParams
 from penny.constants import PennyConstants
@@ -108,6 +108,7 @@ from penny.database.skills import (
 )
 from penny.llm.similarity import embed_text
 from penny.text_validity import is_blank
+from penny.tools.base import Tool
 from penny.tools.micro_context import MicroContext, SkillLabels, SkillSignature
 
 if TYPE_CHECKING:
@@ -303,6 +304,59 @@ def attachment_names(db: Database) -> frozenset[str]:
     )
 
 
+def _resolved_attachment_names(
+    db: Database, run_id: str, certified: list[RunProjectionStep]
+) -> frozenset[str]:
+    """``attachment_names`` widened by the collections THIS RUN'S writes actually
+    landed in (#2270) — never any other live collection.
+
+    ``collection_write`` redirects a near-miss name to an existing collection (its
+    own ``_is_name_variant``) and narrates the redirect in prose, but the entry
+    lands there regardless of what the model typed — so the typed value never
+    becomes a member of ``attachment_names`` (it names no collection at all) and
+    the leaf loses its attachment mark on the exact round this fix is for.  The
+    fact of where the write landed is read off the LEDGER instead of that prose:
+    ``entries_written_by_run`` is the entry-stamp read (#1911) that already
+    answers 'what did this run write, and to which collection' tool-agnostically.
+
+    The ONLY candidate values tested are each certified step's own declared
+    DESTINATION (``Tool.destination_for``, read off the tool's ``stores_entries``
+    sibling ``destination_param``) — never any other argument a storing call
+    carries. A key or an ``extract`` instruction can read as a near-match of a
+    long collection name by sheer token overlap, and the write tool itself never
+    applies the near-match rule to anything but the one argument it resolves a
+    write against (#2273); testing every string leaf would mark leaves the write
+    tool never would. A demonstrated destination that is not itself a collection
+    name, but is a near-match (the SAME ``is_name_variant`` predicate and the SAME
+    two thresholds ``collection_write`` redirects on — one shared rule, so the two
+    sites cannot answer the near-match question differently) of a collection this
+    run actually wrote to, is treated as naming that collection too."""
+    names = attachment_names(db)
+    written = {entry.memory_name for entry in db.memories.entries_written_by_run(run_id)}
+    if not written:
+        return names
+    candidates = {
+        destination
+        for step in certified
+        if (destination := Tool.destination_for(step.call.tool, step.call.arguments)) is not None
+        and destination not in names
+    }
+    resolved = {
+        value
+        for value in candidates
+        if any(
+            is_name_variant(
+                value,
+                target,
+                char_ratio=PennyConstants.MEMORY_NAME_REDIRECT_CHAR_RATIO,
+                tcr=PennyConstants.MEMORY_NAME_REDIRECT_TCR,
+            )
+            for target in written
+        )
+    }
+    return names | resolved
+
+
 class SkillExtractor:
     """The run-end skill-extraction pipeline — one instance per chat agent, holding
     its DB + embedding client (threaded, never ambient state)."""
@@ -434,7 +488,8 @@ class SkillExtractor:
         drawn — the routine was named before the round ran, and this is the same routine.
         The run-end draw survives as the path for a round nothing framed."""
         steps, parameters = distill_steps(
-            self._distill_inputs(projection, certified), attachment_names(self._db)
+            self._distill_inputs(projection, certified),
+            _resolved_attachment_names(self._db, run_id, certified),
         )
         conversation = self._db.messages.recent_conversation(_NAMING_CONVERSATION_TURNS)
         labels = await self._label_skill(steps, parameters, projection, conversation)

@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from similarity.embeddings import token_containment_ratio
+from similarity.embeddings import is_name_variant
 
 from penny.constants import (
     WRITE_GATE_MUTATING_OUTCOMES,
@@ -1372,18 +1372,17 @@ _AUTO_CREATED_DESCRIPTION = PennyConstants.AUTO_CREATED_DESCRIPTION_PREFIX + " '
 
 
 def _is_name_variant(asked: str, existing: str) -> bool:
-    """Near-certain 'same collection, different spelling': a high character ratio
-    (typos, hyphen joins) OR full token containment ('team-news' ⊂
-    'team-news-alerts').  Token overlap via the similarity package's TCR; the
-    char leg shares did-you-mean's stdlib measure."""
-    if (
-        difflib.SequenceMatcher(None, asked, existing).ratio()
-        >= PennyConstants.MEMORY_NAME_REDIRECT_CHAR_RATIO
-    ):
-        return True
-    return (
-        token_containment_ratio(asked.replace("-", " "), existing.replace("-", " "))
-        >= PennyConstants.MEMORY_NAME_REDIRECT_TCR
+    """Near-certain 'same collection, different spelling' (#2270: the one shared
+    predicate, over the one pair of thresholds — ``is_name_variant`` lives in the
+    dependency-light ``similarity`` package precisely so this call and skill
+    distillation's resolved-write check (``skill_extraction.py``) read the SAME
+    rule off the SAME two constants, and cannot drift into two copies answering
+    the near-match question differently)."""
+    return is_name_variant(
+        asked,
+        existing,
+        char_ratio=PennyConstants.MEMORY_NAME_REDIRECT_CHAR_RATIO,
+        tcr=PennyConstants.MEMORY_NAME_REDIRECT_TCR,
     )
 
 
@@ -1537,6 +1536,7 @@ class CollectionWriteTool(MemoryTool):
     # would teach a correction the surface cannot carry out.
     advises = ("update_entry", "collection_delete_entry")
     stores_entries = True
+    destination_param = "memory"
     description = (
         "Write one or more entries to a collection. Each entry has a short "
         "`key` (topic/identifier) and a longer `content` body. Dedup runs "
@@ -1793,6 +1793,7 @@ class UpdateEntryTool(MemoryTool):
     # not-found message names both moves.
     advises = ("collection_write", "collection_keys")
     stores_entries = True
+    destination_param = "memory"
     description = (
         "Replace the content of an existing entry in a collection, identified "
         "by key. Returns an error if the key doesn't exist."
