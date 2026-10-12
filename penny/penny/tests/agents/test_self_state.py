@@ -620,7 +620,9 @@ def test_self_state_taught_skills_only_render(db):
     — <clauses>`` shape the sections above it use, so several skills are a list to
     skim.  What a row does NOT carry is the numbered recipe: this is a 0-call
     INSTANTIATION surface (the parameter names are the binding keys), not a surface
-    anything is carried out from, and the steps stay one ``skill_read`` away."""
+    anything is carried out from — the recipe + parameters block is one call away
+    either way (#2287): ``find`` on the routine's own hit, or ``memory_metadata`` on
+    the job once it is set running."""
     with Session(db.engine) as session:
         _add_skill(
             session,
@@ -1032,7 +1034,7 @@ _KITCHEN_SINK = (
     "\n"
     "### Skills and rules\n"
     "Skills you've been taught — what each one does and what it needs from the user "
-    "to run. For one's exact steps: skill_read(name=<name>).\n"
+    "to run.\n"
     "- Track a shipment — track my package from acme and tell me when it moves "
     "(needs: tracking)\n"
     "- Watch a page field — watch the price on a product page and ping me when it "
@@ -1195,7 +1197,7 @@ _TAUGHT_SKILLS_ONLY = (
     "\n"
     "### Skills and rules\n"
     "Skills you've been taught — what each one does and what it needs from the user "
-    "to run. For one's exact steps: skill_read(name=<name>).\n"
+    "to run.\n"
     "- Track a shipment — track my package from acme and tell me when it moves "
     "(needs: tracking)\n"
     "- Watch a page field — watch the price on a product page and ping me when it "

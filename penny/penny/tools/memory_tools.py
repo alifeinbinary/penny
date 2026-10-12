@@ -86,6 +86,7 @@ from penny.tools.collection_instantiation import (
     render_no_skill_found,
     render_reinstantiation_echo,
     render_schedule_field,
+    render_skill_parameters,
     render_tombstone_duplicate,
     render_unbound_parameters,
     sentinel_expiry_note,
@@ -110,7 +111,6 @@ from penny.tools.memory_args import (
     ReadSimilarArgs,
 )
 from penny.tools.models import NoArgs, ToolResult
-from penny.tools.skill_tools import SkillReadTool
 
 if TYPE_CHECKING:
     from penny.agents.models import ToolCallRecord
@@ -543,13 +543,13 @@ def _lifecycle_block(db: Database, row: MemoryRow) -> list[str]:
 def _skill_provenance_line(row: MemoryRow) -> str | None:
     """``from skill: <name> (<param>=<value>, …)`` — the skill this collection was
     instantiated from (#1591's front door) and the params bound into its render, so
-    the render names the recipe's origin.  The skill name is a live anchor: one
-    ``skill_read(<name>)`` / ``find`` hop reaches its steps + parameters (n≤1), and
-    the bound params are the reachable input a future rebind/re-render consumes.
-    Params are omitted when the skill had no parameters (``from skill: <name>``).
-    Returns ``None`` for a hand-authored / seeded collection (``skill_name`` NULL),
-    so its render stays byte-identical to the unmarked pre-provenance shape — the
-    unmarked case is the quiet default."""
+    the render names the recipe's origin.  The skill name is a live anchor: this same
+    ``memory_metadata`` call carries the routine's parameters block right below it
+    (#2287), and ``find`` reaches the skill row itself (n≤1).  Params are omitted when
+    the skill had no parameters (``from skill: <name>``).  Returns ``None`` for a
+    hand-authored / seeded collection (``skill_name`` NULL), so its render stays
+    byte-identical to the unmarked pre-provenance shape — the unmarked case is the
+    quiet default."""
     if row.skill_name is None:
         return None
     params = skill_params(row)
@@ -557,6 +557,23 @@ def _skill_provenance_line(row: MemoryRow) -> str | None:
         return f"from skill: {row.skill_name}"
     bound = ", ".join(f"{key}={value}" for key, value in params.items())
     return f"from skill: {row.skill_name} ({bound})"
+
+
+def _skill_parameters_block(db: Database, row: MemoryRow) -> str | None:
+    """The job's ``parameters:`` block (#2287) — each parameter the routine declares,
+    whether it is required or optional, its description, and the value THIS job has
+    bound for it (:func:`render_skill_parameters`, the one format this and ``find``'s
+    taught-skill hit, in :func:`_skill_recipe_block`, both read).  ``None`` for a
+    collection with no routine at all (``skill_name`` NULL — the render stays
+    byte-identical to today), or when the registry no longer holds a skill by that
+    name: the provenance line above still names it, so the block simply has nothing
+    further to add rather than asserting a routine's shape from nothing."""
+    if row.skill_name is None:
+        return None
+    skill = db.skills.get(row.skill_name)
+    if skill is None:
+        return None
+    return render_skill_parameters(parameters_from_json(skill.parameters), skill_params(row))
 
 
 def _recent_changes_block(db: Database, name: str) -> list[str]:
@@ -2374,6 +2391,12 @@ class MemoryMetadataTool(MemoryTool):
         # extraction prompt it produced.  Absent for a hand-authored / seeded
         # collection (skill_name NULL), so that render is unchanged.
         skill = _skill_provenance_line(memory)
+        # The routine's own parameters (#2287) — required/optional, description, and
+        # the value this job is bound to — right below the line naming the skill, so
+        # describing a job is one call, not a call plus a second lookup of the recipe's
+        # own parameters.  Absent for the same reasons the provenance line is (no
+        # routine, or one the registry no longer holds).
+        parameters = _skill_parameters_block(self._db, memory)
         # Lead with what the collection is FOR (description) and what it DOES (the
         # recipe), because that is the substance; the operational settings
         # (cadence/timestamps) are secondary and go last.  Ordered this way — and with
@@ -2385,6 +2408,7 @@ class MemoryMetadataTool(MemoryTool):
             f"type: {memory.type}",
             f"description: {memory.description}",
             *([skill] if skill is not None else []),
+            *([parameters] if parameters is not None else []),
             "",
             "What it does each cycle — the recipe below is the collection's actual "
             "behaviour.  When explaining the collection, walk through THESE steps, not the "
@@ -2998,8 +3022,9 @@ def _find_addressing(match: ResolvedMatch) -> str:
     name = match.name
     if match.kind == ResolvedKind.SKILL:
         return (
-            f"read it with skill_read('{name}'); to change it, demonstrate it again "
-            f"in chat — I relearn it automatically, replacing this one"
+            f"set it running with collection_set(name=<a name for the job>, "
+            f"skill='{name}', params=…); to change it, demonstrate it again in "
+            f"chat — I relearn it automatically, replacing this one"
         )
     if match.kind == ResolvedKind.LOG:
         return f"read it with log_read('{name}')"
@@ -3052,21 +3077,47 @@ def _render_entry_hit(index: int, entry: ResolvedEntry) -> str:
     return f"{head}\n   read it: {_entry_addressing(entry)}"
 
 
-def _render_object_hit(index: int, match: ResolvedMatch) -> str:
+def _skill_recipe_block(db: Database, name: str) -> str | None:
+    """A taught-skill hit's own recipe (#2287): its ``parameters:`` block (no bound
+    values — this is the ambient registry row, not a configured job) and its numbered
+    steps (``render_skill`` over the stored steps, parameters shown as ``{name}``),
+    indented under the hit the same way ``how to use it:`` is.  This is the content a
+    job's own render carries minus the name/intent lines the hit's head already
+    shows.  ``find``'s render functions are module-level and have no database
+    handle, so the caller (``FindTool._format``) fetches the row and passes it down.
+    ``None`` when the registry no longer holds a skill by that name, so the hit
+    renders exactly as it does for any other object."""
+    skill = db.skills.get(name)
+    if skill is None:
+        return None
+    parameters = render_skill_parameters(parameters_from_json(skill.parameters))
+    recipe = render_skill(steps_from_json(skill.steps))
+    body = f"{parameters}\nsteps:\n{recipe}"
+    return "\n".join(f"   {line}" for line in body.splitlines())
+
+
+def _render_object_hit(index: int, match: ResolvedMatch, db: Database) -> str:
     """One object hit: ``N. <name> — <state> <type>[: <scope>]`` then the
-    verbatim-usable addressing on the next line."""
+    verbatim-usable addressing on the next line.  A taught-skill hit additionally
+    carries its own recipe (#2287), since a routine with no job running has nowhere
+    else a tool call reaches its steps."""
     head = f"{index}. {match.name} — {_find_state(match)} {_find_type_label(match)}"
     if match.label:
         head += f": {match.label}"
-    return f"{head}\n   how to use it: {_find_addressing(match)}"
+    lines = [head, f"   how to use it: {_find_addressing(match)}"]
+    if match.kind == ResolvedKind.SKILL:
+        recipe = _skill_recipe_block(db, match.name)
+        if recipe is not None:
+            lines.append(recipe)
+    return "\n".join(lines)
 
 
-def _render_find_hit(index: int, hit: ResolvedHit) -> str:
+def _render_find_hit(index: int, hit: ResolvedHit, db: Database) -> str:
     """One fused hit, best-first ranked — dispatched by family: a stored entry
     renders its value + how to read it, an object its state/type + how to use it."""
     if isinstance(hit, ResolvedEntry):
         return _render_entry_hit(index, hit)
-    return _render_object_hit(index, hit)
+    return _render_object_hit(index, hit, db)
 
 
 class FindTool(MemoryTool):
@@ -3105,7 +3156,6 @@ class FindTool(MemoryTool):
         "collection_archive",
         "collection_unarchive",
         "log_read",
-        "skill_read",
     )
     description = (
         "Find anything of your own by meaning, when you don't know its exact name — "
@@ -3156,7 +3206,7 @@ class FindTool(MemoryTool):
     def _format(self, query: str, hits: list[ResolvedHit]) -> str:
         if not hits:
             return _FIND_EMPTY.format(query=query)
-        body = "\n".join(_render_find_hit(i, h) for i, h in enumerate(hits, start=1))
+        body = "\n".join(_render_find_hit(i, h, self._db) for i, h in enumerate(hits, start=1))
         if len(hits) == 1:
             return f'Found 1 thing matching "{query}":\n{body}'
         return (
@@ -3354,12 +3404,6 @@ def build_memory_tools(
         CollectionArchiveTool(db, run_id=run_id),
         CollectionUnarchiveTool(db, run_id=run_id),
         LogCreateTool(db, llm_client),
-        # Skill INSPECTION rides the chat (lifecycle) surface.  There is no
-        # skill_create tool — skills are distilled automatically at chat-run end
-        # (#1658); the model only reads them (skill_read) and instantiates them
-        # (collection_set / collection_set).  A cadence collector follows the
-        # rendered text prompt and never touches the skill registry.
-        SkillReadTool(db),
     ]
     mutations: list[Tool] = [
         CollectionWriteTool(db, llm_client, agent_name, scope=scope, run_id=run_id),

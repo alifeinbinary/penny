@@ -22,6 +22,8 @@ from penny.constants import PennyConstants
 from penny.conversation_machine import ConversationState, RoundFraming
 from penny.database import Database
 from penny.database.memory import (
+    ResolvedKind,
+    ResolvedMatch,
     WriteGateOutcome,
     WriteResult,
     render_run_calls,
@@ -90,6 +92,7 @@ from penny.tools.memory_tools import (
     ReadRunCallsTool,
     ReadSimilarTool,
     _format_duplicate,
+    _render_object_hit,
     build_memory_tools,
     collector_tool_surface,
     render_nothing_landed,
@@ -4131,7 +4134,6 @@ class TestFactory:
         "collection_archive",
         "collection_unarchive",
         "log_create",
-        "skill_read",
         # Entry mutations (contents)
         "collection_write",
         "collection_delete_entry",
@@ -4371,10 +4373,11 @@ class TestCollectionSkillProvenanceRender:
     """Collection→skill provenance (#1603): a skill-instantiated collection records
     the skill it was rendered from + the params bound into its render, and the
     catalog / metadata surfaces name them — ``from skill: <name> (<param>=<value>)``.
-    The skill name is a live anchor (one ``skill_read`` hop reaches its steps/holes),
-    and the bound params are the reachable input a rebind/re-render consumes.  A
-    hand-authored / seeded collection (``skill_name`` NULL) renders EXACTLY as before
-    — the unmarked case is the quiet default, pinned byte-for-byte."""
+    The skill name is a live anchor (``memory_metadata`` renders the routine's own
+    parameters block right below it, #2287), and the bound params are the reachable
+    input a rebind/re-render consumes.  A hand-authored / seeded collection
+    (``skill_name`` NULL) renders EXACTLY as before — the unmarked case is the quiet
+    default, pinned byte-for-byte."""
 
     @pytest.mark.asyncio
     async def test_catalog_names_instantiating_skill_and_params_whole(self, db):
@@ -4410,8 +4413,20 @@ class TestCollectionSkillProvenanceRender:
     async def test_metadata_names_instantiating_skill_and_params(self, db):
         """``memory_metadata`` names the skill + bound params, positioned ahead of the
         extraction prompt it produced — so "which skill made this, and with what?" is
-        the same call that reads the collection."""
-        _seed_watch_skill(db)
+        the same call that reads the collection.  It also renders the routine's own
+        ``parameters:`` block (#2287) right below that line, before the recipe: each
+        declared parameter's required/optional marking, its description, and the value
+        THIS job is bound to — or an honest gap for one nothing was supplied for — so
+        describing a job is this one call rather than a second skill-read hop."""
+        _seed_watch_skill(
+            db,
+            parameters=[
+                SkillParameter(name="peak", required=True, description="the peak to track"),
+                SkillParameter(
+                    name="note", required=False, description="an optional note to attach"
+                ),
+            ],
+        )
         await CollectionCreateTool(db, cast(Any, MockLlmClient())).execute(
             name="cinder-elevation",
             description="watch Cinder Peak's elevation",
@@ -4421,8 +4436,37 @@ class TestCollectionSkillProvenanceRender:
         )
         result = await MemoryMetadataTool(db).execute(memory="cinder-elevation")
         assert "from skill: Watch elevation (peak=Cinder Peak)" in result.message
-        # The provenance names the recipe's origin, ahead of the recipe itself.
-        assert result.message.index("from skill:") < result.message.index("extraction prompt:")
+        assert (
+            "parameters:\n"
+            "  - peak (required): the peak to track — bound to: Cinder Peak\n"
+            "  - note (optional): an optional note to attach — nothing was supplied "
+            "for this job"
+        ) in result.message
+        # Provenance, then the routine's own parameters, then the recipe it produced —
+        # in that order.
+        assert (
+            result.message.index("from skill:")
+            < result.message.index("parameters:")
+            < result.message.index("extraction prompt:")
+        )
+
+    @pytest.mark.asyncio
+    async def test_parameters_block_omitted_when_the_skill_is_gone(self, db):
+        """A ``skill_name`` the registry no longer holds (#2287): the provenance line
+        still names it, so the parameters block simply has nothing further to add
+        rather than asserting a routine's shape from nothing."""
+        _seed_watch_skill(db)
+        await CollectionCreateTool(db, cast(Any, MockLlmClient())).execute(
+            name="cinder-elevation",
+            description="watch Cinder Peak's elevation",
+            skill=_SKILL_NAME,
+            params={"peak": "Cinder Peak"},
+            schedule="FREQ=HOURLY",
+        )
+        db.skills.delete(_SKILL_NAME)
+        result = await MemoryMetadataTool(db).execute(memory="cinder-elevation")
+        assert "from skill: Watch elevation (peak=Cinder Peak)" in result.message
+        assert "parameters:" not in result.message
 
     @pytest.mark.asyncio
     async def test_hand_authored_collection_renders_byte_identical(self, db):
@@ -4452,6 +4496,9 @@ class TestCollectionSkillProvenanceRender:
         assert "from skill:" not in catalog.message
         metadata = await MemoryMetadataTool(db).execute(memory="plain-watch")
         assert "from skill:" not in metadata.message
+        # No routine at all (#2287) — the new parameters block is absent too, so a
+        # hand-authored collection's metadata render is unchanged.
+        assert "parameters:" not in metadata.message
 
     @pytest.mark.asyncio
     async def test_holeless_skill_renders_skill_name_only(self, db):
@@ -4577,8 +4624,11 @@ class TestFind:
         "reconfigure it with collection_set(name='aurora-watch', ...), archive it "
         "with collection_archive('aurora-watch')\n"
         "2. escalate-aurora — live taught skill: aurora beacon cascade gamma\n"
-        "   how to use it: read it with skill_read('escalate-aurora'); to change it, "
-        "demonstrate it again in chat — I relearn it automatically, replacing this one\n"
+        "   how to use it: set it running with collection_set(name=<a name for the "
+        "job>, skill='escalate-aurora', params=…); to change it, demonstrate it "
+        "again in chat — I relearn it automatically, replacing this one\n"
+        "   parameters: none\n"
+        "   steps:\n"
         "3. aurora-archive — archived collection: aurora beacon delta\n"
         "   how to use it: restore it with collection_unarchive('aurora-archive'); its "
         "entries stay readable with collection_read_latest('aurora-archive')\n"
@@ -4622,6 +4672,58 @@ class TestFind:
         result = await FindTool(db, client).execute(query="aurora beacon cascade")
         assert result.success
         assert result.message == self._KITCHEN_SINK
+
+    @pytest.mark.asyncio
+    async def test_skill_hit_carries_its_own_recipe(self, db, mock_llm):
+        """A taught-skill hit carries its own ``parameters:`` block and numbered
+        steps (#2287), indented under the addressing line — a routine with no job
+        running has nowhere else a tool call reaches its steps, since the self-state
+        header's skills section is prose and ``memory_metadata`` describes a
+        configured COLLECTION, not the bare registry row."""
+        client = _axis_client(mock_llm)
+        db.skills.upsert(
+            SkillDraft(
+                name=_SKILL_NAME,
+                intent="watch a peak's elevation and save it",
+                description="aurora beacon cascade gamma",
+                steps=_watch_skill_steps(),
+                parameters=[
+                    SkillParameter(name=_SKILL_HOLE, required=True, description="the peak to check")
+                ],
+                source_run_id="run-teach",
+            ),
+            author="chat",
+            description_embedding=_axis_vec("aurora beacon cascade gamma"),
+        )
+        result = await FindTool(db, client).execute(query="aurora beacon cascade gamma")
+        assert result.message == (
+            'Found 1 thing matching "aurora beacon cascade gamma":\n'
+            f"1. {_SKILL_NAME} — live taught skill: aurora beacon cascade gamma\n"
+            "   how to use it: set it running with collection_set(name=<a name for "
+            f"the job>, skill='{_SKILL_NAME}', params=…); to change it, demonstrate "
+            "it again in chat — I relearn it automatically, replacing this one\n"
+            "   parameters:\n"
+            "     - peak (required): the peak to check\n"
+            "   steps:\n"
+            "   1. browse(queries=[{peak}], extract='the elevation above sea level')\n"
+            "   2. collection_write(memory={the collection this is set up on}, "
+            "entries=[{'key': {peak}, 'content': the value from step 1}])"
+        )
+
+    def test_skill_hit_renders_short_form_when_the_routine_is_gone(self, db):
+        """A ``find`` hit whose routine the registry no longer holds renders exactly
+        as it does for any other object — the recipe block is simply absent, never
+        fabricated from nothing (#2287)."""
+        match = ResolvedMatch(
+            name="vanished-routine", kind=ResolvedKind.SKILL, archived=False, label=""
+        )
+        assert _render_object_hit(1, match, db) == (
+            "1. vanished-routine — live taught skill\n"
+            "   how to use it: set it running with collection_set(name=<a name for "
+            "the job>, skill='vanished-routine', params=…); to change it, "
+            "demonstrate it again in chat — I relearn it automatically, replacing "
+            "this one"
+        )
 
     @pytest.mark.asyncio
     async def test_type_argument_is_rejected(self, db, mock_llm):
