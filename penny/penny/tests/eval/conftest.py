@@ -118,6 +118,15 @@ from penny.tools.micro_context import (
 )
 from penny.tools.skill_tools import render_skill_shape
 
+# A new eval DRIVER (a ``*_eval`` pytest fixture) lives in its own module under
+# ``drivers/``, never appended here (#2395) — two case PRs that each add a driver no
+# longer land on the same lines.  Loaded as a plugin from ``penny/tests/conftest.py``
+# (the suite's actual root — ``pytest_plugins`` is only honoured in an INITIAL
+# conftest, and this one isn't always that: a run scoped under ``penny/tests/eval/``
+# makes it initial, but the real suite root (``penny/tests/``) never does), so
+# dropping a module into ``drivers/`` is the whole registration — nothing here
+# names it, and nothing here declares ``pytest_plugins`` either.
+
 # Samples per case.  Override with EVAL_SAMPLES=2 for a quick smoke run.
 SAMPLES = int(os.environ.get("EVAL_SAMPLES", "5"))
 
