@@ -17,6 +17,7 @@ import httpx
 import openai
 
 from penny.constants import PennyConstants
+from penny.llm.call_link import CallLink
 from penny.llm.models import (
     FAULT_LOG_FIELD,
     PROVIDER_LOG_FIELD,
@@ -267,12 +268,11 @@ class LlmClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         format: dict | str | None = None,
+        *,
+        call_link: CallLink,
         agent_name: str | None = None,
         prompt_type: str | None = None,
-        run_id: str | None = None,
         run_target: str | None = None,
-        parent_run_id: str | None = None,
-        parent_tool_call_id: str | None = None,
     ) -> LlmResponse:
         """Generate a chat completion with optional tool calling.
 
@@ -285,12 +285,17 @@ class LlmClient:
         retried twice before answering reports its real cost, which is what the eval
         harness's token-cost accounting reads.
 
-        ``parent_run_id`` / ``parent_tool_call_id`` link a draw made INSIDE a tool
-        (a micro-context, which mints its own ``run_id`` for its own ledger
-        attribution) back to the chat/collector run — and, for a draw made from
-        inside a dispatched tool call, that call's own id — it was made on behalf
-        of, so that run's own record can list it.
+        ``call_link`` (#2458) is REQUIRED — no ambient state, no ``X or <mint>``
+        fallback here (the code owner's ruling: the type checker is the
+        enforcement). It names this call's own ``run_id`` and, for a draw made on
+        behalf of an enclosing run (a micro-context, which mints its own ``run_id``
+        via :meth:`~penny.llm.call_link.CallLink.child` for its own ledger
+        attribution) or from inside a dispatched tool call, that run's/call's id —
+        read straight off the link, never re-derived here.
         """
+        resolved_run_id = call_link.run_id
+        parent_run_id = call_link.parent_run_id
+        parent_tool_call_id = call_link.parent_tool_call_id
         start = time.time()
         messages_snapshot = list(messages)
         try:
@@ -304,7 +309,7 @@ class LlmClient:
                 self._elapsed_ms(start),
                 agent_name,
                 prompt_type,
-                run_id,
+                resolved_run_id,
                 run_target,
                 parent_run_id,
                 parent_tool_call_id,
@@ -323,7 +328,7 @@ class LlmClient:
                 self._elapsed_ms(start),
                 agent_name,
                 prompt_type,
-                run_id,
+                resolved_run_id,
                 run_target,
                 parent_run_id,
                 parent_tool_call_id,
@@ -342,7 +347,7 @@ class LlmClient:
             self._elapsed_ms(start),
             agent_name,
             prompt_type,
-            run_id,
+            resolved_run_id,
             run_target,
             parent_run_id,
             parent_tool_call_id,
@@ -455,9 +460,10 @@ class LlmClient:
         prompt: str,
         tools: list[dict] | None = None,
         format: dict | str | None = None,
+        *,
+        call_link: CallLink,
         agent_name: str | None = None,
         prompt_type: str | None = None,
-        run_id: str | None = None,
     ) -> LlmResponse:
         """Generate a completion for a prompt (converts to chat format internally)."""
         messages = [{"role": "user", "content": prompt}]
@@ -465,9 +471,9 @@ class LlmClient:
             messages,
             tools,
             format,
+            call_link=call_link,
             agent_name=agent_name,
             prompt_type=prompt_type,
-            run_id=run_id,
         )
 
     # ── Embeddings ───────────────────────────────────────────────────────

@@ -72,6 +72,7 @@ from penny.database.models import MemoryEntry, MemoryRow, Skill
 from penny.database.skill_store import parameters_from_json
 from penny.database.skills import SkillParameter
 from penny.datetime_utils import format_log_timestamp, stored_as_utc, user_timezone_name
+from penny.llm.call_link import CallLink
 from penny.llm.client import LlmClient
 from penny.notification import (
     NOTIFICATION_NOTES,
@@ -297,8 +298,15 @@ class Collector(BackgroundAgent):
         ``trigger`` says what set this cycle running — the schedule, or the user — and
         is carried, never inferred: the notification reads it to pick its delivery lane
         and the retry budget is keyed on it (#1939).
+
+        A top-level run starter (#2458): mints the top ``CallLink`` around the
+        WHOLE cycle — the loop AND the notifier — because the notifier's draw
+        happens after ``_run_cycle`` returns, outside ``Agent.run``'s own
+        (narrower) link.  Everything this cycle calls links back to it, passed
+        explicitly — no ambient state anywhere.
         """
         run_id = uuid.uuid4().hex
+        call_link = CallLink.top(run_id)
         success = False
         response: ControllerResponse | None = None
         reads: tuple[CursorReadTool, ...] = ()
@@ -311,11 +319,13 @@ class Collector(BackgroundAgent):
         async with self._cycle_lock:
             try:
                 self._bind(collection)
-                result = await self._run_cycle(run_id)
+                result = await self._run_cycle(run_id, call_link)
                 success = result.success
                 response = result.response
                 reads = result.reads
-                notified = await self._notify_if_due(collection, run_id, response, trigger)
+                notified = await self._notify_if_due(
+                    collection, run_id, call_link, response, trigger
+                )
             except asyncio.CancelledError:
                 # Foreground activity preempted the cycle — tag clearly rather
                 # than letting it look like a model crash, then re-raise.
@@ -388,6 +398,7 @@ class Collector(BackgroundAgent):
         self,
         collection: MemoryRow,
         run_id: str,
+        call_link: CallLink,
         response: ControllerResponse,
         trigger: CycleTrigger,
     ) -> NotificationOutcome | None:
@@ -426,7 +437,9 @@ class Collector(BackgroundAgent):
             return None
         if self._program_writes() and not any(record.mutated for record in response.tool_calls):
             return None
-        return await self._notifier.notify(collection, run_id, response.tool_calls, trigger)
+        return await self._notifier.notify(
+            collection, run_id, response.tool_calls, trigger, call_link=call_link
+        )
 
     def _program_writes(self) -> bool:
         """Whether this cycle's bound program declares a step that asks the store to

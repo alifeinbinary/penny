@@ -21,6 +21,7 @@ from penny.conversation_machine import ConversationMachine, RoundFraming, TurnEn
 from penny.database.media_store import ImageSelectionPolicy
 from penny.database.models import Media, MessageLog
 from penny.llm import LlmClient
+from penny.llm.call_link import CallLink
 from penny.llm.embeddings import serialize_embedding
 from penny.llm.similarity import embed_text
 from penny.responses import PennyResponse
@@ -699,7 +700,9 @@ class MessageChannel(ABC):
         )
         await self.send_message(message.sender, PennyResponse.PROFILE_REQUIRED)
 
-    async def _classify_state(self, message: IncomingMessage, run_id: str) -> TurnEntry | None:
+    async def _classify_state(
+        self, message: IncomingMessage, run_id: str, call_link: CallLink
+    ) -> TurnEntry | None:
         """Move the conversation state machine for this incoming message (#1706).
 
         Runs BEFORE the turn — the machine's whole purpose is that the turn is
@@ -723,6 +726,7 @@ class MessageChannel(ABC):
                 message.content,
                 penny_last_turn=self._db.messages.last_outgoing_content(),
                 run_id=run_id,
+                call_link=call_link,
                 run_target=self._message_agent.name,
             )
         except Exception as exc:
@@ -756,6 +760,11 @@ class MessageChannel(ABC):
         message agent's ``name`` (template-method override on the agent
         subclass) — passed explicitly down the call chain rather than
         threaded through ambient state.
+
+        The true top-level run starter for a chat turn (#2458): mints the top
+        ``CallLink`` before the state classifier even draws — so the classifier,
+        the main loop, and run-end skill extraction all link back to this one run,
+        passed explicitly down the call chain with no ambient state anywhere.
         """
         logger.info("Dispatching to message agent for %s", message.sender)
         # Mint the turn's run id here so the same id stamps every promptlog row of
@@ -765,17 +774,18 @@ class MessageChannel(ABC):
         # linked structurally to the run by ``link_source_message``.
         # ``user-messages`` is a read facade over ``messagelog`` — no separate append.
         run_id = uuid.uuid4().hex
+        call_link = CallLink.top(run_id)
         parent_id: int | None = None
         if message.quoted_text:
             parent_id, _ = self._db.messages.get_thread_context(message.quoted_text)
-        entered = await self._classify_state(message, run_id)
+        entered = await self._classify_state(message, run_id, call_link)
         response = await self._message_agent.handle(
             content=message.content,
             sender=user_sender,
+            call_link=call_link,
             images=message.images or None,
             page_context=message.page_context,
             quoted_text=message.quoted_text,
-            run_id=run_id,
             state=entered.state if entered is not None else None,
             framing=self._round_framing(),
             shortfall=entered.shortfall if entered is not None else None,

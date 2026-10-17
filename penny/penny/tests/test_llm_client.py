@@ -21,6 +21,7 @@ from sqlmodel import select
 from penny.constants import PennyConstants
 from penny.database import Database
 from penny.database.models import PromptLog
+from penny.llm.call_link import CallLink
 from penny.llm.client import (
     LlmClient,
     _extract_model_ids,
@@ -107,7 +108,7 @@ class TestChatPropagatesSummarizedError:
         monkeypatch.setattr(client.client.chat.completions, "create", raise_not_found)
 
         with pytest.raises(LlmNotFoundError) as exc_info:
-            await client.chat([{"role": "user", "content": "hi"}])
+            await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
 
         message = str(exc_info.value)
         assert "HTTP 404" in message
@@ -166,7 +167,7 @@ class TestReasoningAlwaysOn:
             api_url="http://localhost:11434", model="m", max_retries=1, retry_delay=0.0
         )
         monkeypatch.setattr(client.client.chat.completions, "create", capture)
-        await client.chat([{"role": "user", "content": "hi"}])
+        await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
 
         assert sent["extra_body"] == {"reasoning": {"enabled": True}}
         await client.close()
@@ -200,7 +201,7 @@ class TestRetryResilience:
         monkeypatch.setattr("penny.llm.client.asyncio.sleep", record_sleep)
 
         with pytest.raises(LlmTimeoutError):
-            await client.chat([{"role": "user", "content": "hi"}])
+            await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
 
         # Three attempts, so two waits between them — doubling, not flat.
         assert waits == [1.0, 2.0]
@@ -233,7 +234,7 @@ class TestRetryResilience:
         monkeypatch.setattr(client.client.chat.completions, "create", answer_without_a_completion)
 
         with pytest.raises(LlmResponseError) as exc_info:
-            await client.chat([{"role": "user", "content": "hi"}])
+            await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
 
         assert attempts == 3  # retried, not raised on the first one
         # The provider's own words survive, so the run record says WHY rather than "None".
@@ -423,7 +424,7 @@ class TestFaultClassIsAValueNotASentence:
         monkeypatch.setattr(client.client.chat.completions, "create", refuse)
 
         with pytest.raises(LlmResponseError) as exc_info:
-            await client.chat([{"role": "user", "content": "hi"}])
+            await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
 
         assert exc_info.value.fault == LlmFault.RATE_LIMITED
         await client.close()
@@ -445,7 +446,7 @@ class TestFaultClassIsAValueNotASentence:
         monkeypatch.setattr(client.client.chat.completions, "create", answer_without_a_completion)
 
         with pytest.raises(LlmResponseError) as exc_info:
-            await client.chat([{"role": "user", "content": "hi"}])
+            await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
 
         assert exc_info.value.fault == LlmFault.NO_CHOICES
         await client.close()
@@ -491,7 +492,7 @@ class TestAConfiguredProviderIsPinned:
         monkeypatch.setattr(client.client.chat.completions, "create", capture)
 
         with pytest.raises(LlmError):
-            await client.chat([{"role": "user", "content": "hi"}])
+            await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
 
         # The reasoning switch still rides the same passthrough — one is not added at the
         # cost of the other, and a run that lost it would be comparing a model to itself.
@@ -515,7 +516,7 @@ class TestAConfiguredProviderIsPinned:
         monkeypatch.setattr(client.client.chat.completions, "create", capture)
 
         with pytest.raises(LlmError):
-            await client.chat([{"role": "user", "content": "hi"}])
+            await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
 
         assert sent["extra_body"] == {"reasoning": {"enabled": True}}
         await client.close()
@@ -558,7 +559,9 @@ class TestAConfiguredProviderIsPinned:
         )
         monkeypatch.setattr(client.client.chat.completions, "create", answer)
 
-        response = await client.chat([{"role": "user", "content": "hi"}])
+        response = await client.chat(
+            [{"role": "user", "content": "hi"}], call_link=CallLink.new_top()
+        )
 
         # It pinned Cloudflare and DeepInfra answered — stated rather than hidden behind an
         # assumption that the pin held.
@@ -604,7 +607,9 @@ class TestParallelCallsReturnedAsOneCall:
             api_url="http://localhost:11434", model="m", db=db, max_retries=1, retry_delay=0.0
         )
         monkeypatch.setattr(client.client.chat.completions, "create", answer)
-        response = await client.chat([{"role": "user", "content": "hi"}], run_id="run-1")
+        response = await client.chat(
+            [{"role": "user", "content": "hi"}], call_link=CallLink.top("run-1")
+        )
         await client.close()
         return response
 
@@ -700,7 +705,9 @@ class TestCallLoggedHoweverItEnds:
         )
         monkeypatch.setattr(client.client.chat.completions, "create", answer)
 
-        await client.chat([{"role": "user", "content": "hi"}], agent_name="chat", run_id="run-ok")
+        await client.chat(
+            [{"role": "user", "content": "hi"}], agent_name="chat", call_link=CallLink.top("run-ok")
+        )
         await client.close()
 
         row = self._one_row(db)
@@ -730,7 +737,7 @@ class TestCallLoggedHoweverItEnds:
             await client.chat(
                 [{"role": "user", "content": "hi"}],
                 agent_name="browse-extract",
-                run_id="run-cancelled",
+                call_link=CallLink.top("run-cancelled"),
             )
         await client.close()
 
@@ -758,7 +765,9 @@ class TestCallLoggedHoweverItEnds:
         monkeypatch.setattr(client.client.chat.completions, "create", always_refuse)
 
         with pytest.raises(LlmConnectionError):
-            await client.chat([{"role": "user", "content": "hi"}], run_id="run-raised")
+            await client.chat(
+                [{"role": "user", "content": "hi"}], call_link=CallLink.top("run-raised")
+            )
         await client.close()
 
         row = self._one_row(db)
@@ -781,7 +790,9 @@ class TestCallLoggedHoweverItEnds:
         monkeypatch.setattr(client.client.chat.completions, "create", always_time_out)
 
         with pytest.raises(LlmTimeoutError):
-            await client.chat([{"role": "user", "content": "hi"}], run_id="run-timeout")
+            await client.chat(
+                [{"role": "user", "content": "hi"}], call_link=CallLink.top("run-timeout")
+            )
         await client.close()
 
         row = self._one_row(db)
@@ -811,7 +822,9 @@ class TestCallLoggedHoweverItEnds:
         )
         monkeypatch.setattr(client.client.chat.completions, "create", fail_once_then_answer)
 
-        await client.chat([{"role": "user", "content": "hi"}], run_id="run-retried")
+        await client.chat(
+            [{"role": "user", "content": "hi"}], call_link=CallLink.top("run-retried")
+        )
         await client.close()
 
         assert attempts == 2  # it DID retry
@@ -840,7 +853,7 @@ class TestCallLoggedHoweverItEnds:
         )
         monkeypatch.setattr(client.client.chat.completions, "create", slow_then_fast)
 
-        await client.chat([{"role": "user", "content": "hi"}], run_id="run-slow")
+        await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.top("run-slow"))
         await client.close()
 
         row = self._one_row(db)
@@ -849,11 +862,12 @@ class TestCallLoggedHoweverItEnds:
 
 
 class TestMicroContextDrawLinksToItsParentCall:
-    """A draw ``LlmClient.chat`` makes on behalf of a micro-context carries
-    ``parent_run_id`` / ``parent_tool_call_id`` (#2355 part A) straight through to
-    its ``promptlog`` row, so the enclosing run's own record can list it — the full
+    """A draw ``LlmClient.chat`` makes on behalf of a micro-context links back to
+    its ``promptlog`` row's ``parent_run_id`` / ``parent_tool_call_id`` purely from
+    the EXPLICIT ``call_link`` it is handed (#2458, the code owner's ruling against
+    ambient state) — never a parameter ``chat`` derives for itself.  The full
     tool-nested path is covered in ``tests/tools/test_browse_micro_context.py``;
-    this pins the plain pass-through at the client itself."""
+    this pins the plain explicit-link read at the client itself."""
 
     @pytest.mark.asyncio
     async def test_the_parent_ids_land_on_the_logged_row(self, monkeypatch, db: Database) -> None:
@@ -865,15 +879,39 @@ class TestMicroContextDrawLinksToItsParentCall:
         )
         monkeypatch.setattr(client.client.chat.completions, "create", answer)
 
-        await client.chat(
-            [{"role": "user", "content": "hi"}],
-            run_id="draw-run",
-            parent_run_id="chat-run-1",
-            parent_tool_call_id="call-browse-1",
-        )
+        # Two levels, exactly as production nests them: the enclosing chat/collector
+        # run ("chat-run-1") is handed to the tool dispatcher, which derives the
+        # dispatched call's own link (``for_tool_call``), and a micro-context's OWN
+        # draw derives ITS OWN link from that (``child``) — capturing "chat-run-1"
+        # as its PARENT and "call-browse-1" as its parent tool call in the process.
+        dispatched = CallLink.top("chat-run-1").for_tool_call("call-browse-1")
+        draw_link = dispatched.child()
+        await client.chat([{"role": "user", "content": "hi"}], call_link=draw_link)
         await client.close()
 
         with db.get_session() as session:
             row = session.exec(select(PromptLog)).one()
         assert row.parent_run_id == "chat-run-1"
         assert row.parent_tool_call_id == "call-browse-1"
+
+    @pytest.mark.asyncio
+    async def test_a_top_level_call_links_to_nothing(self, monkeypatch, db: Database) -> None:
+        """A run starter's own top link (``CallLink.new_top()``) lands a FETCHABLE
+        ``run_id`` with no parent — the shape every real top-level caller (a chat
+        turn, a collector cycle) produces."""
+
+        async def answer(**kwargs):
+            return _completion("ok")
+
+        client = LlmClient(
+            api_url="http://localhost:11434", model="m", db=db, max_retries=1, retry_delay=0.0
+        )
+        monkeypatch.setattr(client.client.chat.completions, "create", answer)
+
+        await client.chat([{"role": "user", "content": "hi"}], call_link=CallLink.new_top())
+        await client.close()
+
+        with db.get_session() as session:
+            row = session.exec(select(PromptLog)).one()
+        assert row.run_id is not None
+        assert row.parent_run_id is None
