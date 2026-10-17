@@ -4,6 +4,8 @@
  */
 
 import {
+  type ConnectionState,
+  ConnectionState as CS,
   type CursorRecord,
   type DomainAllowlist,
   DomainPermission as DP,
@@ -188,6 +190,23 @@ function handleMessage(message: RuntimeMessage): void {
     handleMemoryChanged(message.name);
   } else if (message.type === RuntimeMessageType.CollectionTriggerResult) {
     handleCollectionTriggerResult(message);
+  } else if (message.type === RuntimeMessageType.ConnectionState) {
+    handleConnectionState(message.state);
+  }
+}
+
+function handleConnectionState(state: ConnectionState): void {
+  // background.ts only pushes the current state on a *change* — the page
+  // gets no initial push on load (that's a sidebar-port-only courtesy) — so
+  // every Connected the page ever hears here is a state change, never the
+  // page's own starting state. That covers both cases: a reconnect after a
+  // drop (init()'s own fetch is stale) and a load that raced the socket
+  // coming up (init()'s own fetch went nowhere). Either way, catch up now.
+  if (state !== CS.Connected) return;
+  resetAndFetchPrompts();
+  const memoriesPanel = document.getElementById("panel-memories");
+  if (memoriesPanel && !memoriesPanel.classList.contains("hidden")) {
+    requestMemories();
   }
 }
 
@@ -210,8 +229,7 @@ function setupPrompts(): void {
       )) {
         b.classList.toggle("active", b === btn);
       }
-      allRuns = [];
-      requestPromptLogs(0);
+      resetAndFetchPrompts();
     });
   }
   promptsLoadMoreBtn.addEventListener("click", () => {
@@ -221,8 +239,7 @@ function setupPrompts(): void {
   flaggedToggle?.addEventListener("click", () => {
     flaggedOnly = !flaggedOnly;
     flaggedToggle.classList.toggle("active", flaggedOnly);
-    allRuns = [];
-    requestPromptLogs(0);
+    resetAndFetchPrompts();
   });
   const search = document.getElementById("prompts-search") as HTMLInputElement | null;
   if (search) {
@@ -244,6 +261,11 @@ function setupPrompts(): void {
     });
   }
   wireSearchClear("prompts-search", "prompts-search-clear");
+}
+
+function resetAndFetchPrompts(): void {
+  allRuns = [];
+  requestPromptLogs(0);
 }
 
 function requestPromptLogs(offset: number): void {
