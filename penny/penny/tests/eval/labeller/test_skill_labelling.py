@@ -6,17 +6,23 @@ provenance verdict, no routine name, no routine description.  The interface half
 description · parameters, decided from the user's ask alone) is the framer's, a separate
 draw that never sees this one's evidence.
 
-The file holds the canonical set (#2004's, #2058).  Four cases, each one demonstration in
-five wordings pooled into a cohort of fifteen, claimed against ``docs/eval-case-design.md``:
+The file holds the canonical set (#2004's, #2058), plus one case added for #2361.  Five
+cases, each one demonstration in five wordings pooled into a cohort of fifteen, claimed
+against ``docs/eval-case-design.md``:
 ``namer-tells-two-sources-apart`` · ``namer-names-a-search-spot-as-a-search`` ·
 ``namer-names-every-spot-from-a-single-turn-teach`` ·
-``namer-names-every-spot-in-a-longer-routine``.  All four make the SAME two claims on
-different demonstrations, plus one SHARED MEASURE (below); the two-sources and
-longer-routine cases each add a distinctness claim their ledger earns, and the other two
-exercise rather than newly assert — each says so in its own docstring rather than dressing
-it up.  No case claims that a value filling two argument sites draws ONE name: a split
-shared spot keys a line to a name nobody offered, which the production validator refuses
-and re-rolls, so the claim would run 15/15 by construction.
+``namer-names-every-spot-in-a-longer-routine`` ·
+``namer-names-a-value-that-repeats-across-three-reads``.  All five make the SAME two claims
+on different demonstrations, plus one SHARED MEASURE (below); three of them — two-sources,
+longer-routine, and the repeating-value case — each add a distinctness claim their ledger
+earns, and the other two exercise rather than newly assert — each says so in its own
+docstring rather than dressing it up.  No case claims that a value filling several argument
+sites draws ONE name: a split shared spot keys a line to a name nobody offered, which the
+production validator refuses and re-rolls, so the claim would run 15/15 by construction —
+the repeating-value case's own shared ``queries`` spot (#2361) is built for exactly that
+reason: to put the shape on the cohort's COST axis, never on its claims.  That ledger is
+read VERBATIM off the namer's slowest reference-run draw, not invented from a description —
+see its own section for the promptlog id and the scratch replay that confirmed it reproduces.
 
 Each case is a fixture LEDGER, and its input document is rendered from that ledger by
 the shipped ``distill_steps`` + ``build_naming_content`` — never hand-written — so the
@@ -386,7 +392,107 @@ _LONGER_ROUTINE = LabellingFixture(
 )
 
 
-# ── The PORTED set: four cases, each one demonstration in five wordings ───────
+# ── Case 5: one value repeats, byte-identical, across three reads (#2361) ─────
+#
+# Every ledger above pairs two spots that share an ARGUMENT NAME but carry two
+# DIFFERENT demonstrated values (``queries``/``queries-2``, ``memory``/``memory-2``).
+# None of them puts the SAME literal value at two or more sites, which is the shape
+# #2361 traces the namer's slowest reference-run draw to — read verbatim off that
+# draw's own ``promptlog`` row (``transition-elicit-to-learn-absent-5``, id 12,
+# ``agent_name='skill-namer'``) rather than invented from a description: THREE
+# ``browse`` calls against one page, one ``queries`` placeholder filling all three
+# sites with the identical demonstrated value, and three ``extract`` spots whose
+# demonstrated values are two near-paraphrases of the same fact plus a generic
+# "everything on the page" fallback — and NO write step at all (the demonstrating
+# ask says "and keep it", but nothing in the certified routine saved anything; that
+# mismatch is itself part of the real input, so this ledger keeps it rather than
+# inventing a write the original never had).
+#
+# ``distill_steps`` collapses an identical value into ONE shared parameter spanning
+# every site it fills (``penny/penny/database/skills.py``'s ``_ParameterNamer`` —
+# "the same value in two places is ONE parameter"), so ``queries`` is offered ONCE,
+# attributed to three sites — the shape the cohort's cost axis had never been
+# measured on before a scratch replay of the real draw (10 replays, 115s median,
+# 10/10 re-quoting "Two spots are never the same spot") confirmed it reproduces.
+_REPEATED_VALUE = LabellingFixture(
+    case_id="namer-names-a-value-that-repeats-across-three-reads",
+    conversation=(
+        _user(
+            "can you check the trailhead's conditions board every weekend and let me "
+            "know when the trail reopens?"
+        ),
+        _penny(
+            "i can learn that — walk me through it once? where should i look, and what "
+            "am i checking for?"
+        ),
+    ),
+    utterance=(
+        "sure — open ridgeline.example/trailhead-conditions, get the date the trail "
+        "reopens, and keep it"
+    ),
+    calls=(
+        (
+            "browse",
+            {
+                "extract": "the date the trail reopens",
+                "queries": ["ridgeline.example/trailhead-conditions"],
+            },
+            "You opened the trailhead conditions page (browse result)\nreopens saturday",
+            True,
+        ),
+        (
+            "browse",
+            {
+                "extract": "the reopening date for the trail",
+                "queries": ["ridgeline.example/trailhead-conditions"],
+            },
+            "You opened the trailhead conditions page (browse result)\nreopens saturday",
+            True,
+        ),
+        (
+            "browse",
+            {
+                "extract": "everything on the page",
+                "queries": ["ridgeline.example/trailhead-conditions"],
+            },
+            "You opened the trailhead conditions page (browse result)\n"
+            "reopens saturday, parking lot closed, no dogs after dark",
+            True,
+        ),
+    ),
+    target="trail-status",
+    leaves=(
+        "the date the trail reopens",
+        "ridgeline.example/trailhead-conditions",
+        "the reopening date for the trail",
+        "everything on the page",
+    ),
+    rendered_input=(
+        f"{_CONVERSATION_HEADING}\n"
+        "user: can you check the trailhead's conditions board every weekend and let me "
+        "know when the trail reopens?\n"
+        "penny: i can learn that — walk me through it once? where should i look, and "
+        "what am i checking for?\n"
+        "user: sure — open ridgeline.example/trailhead-conditions, get the date the "
+        "trail reopens, and keep it\n"
+        "\n"
+        "The skill's steps:\n"
+        "1. browse(extract={extract}, queries=[{queries}])\n"
+        "2. browse(extract={extract-2}, queries=[{queries}])\n"
+        "3. browse(extract={extract-3}, queries=[{queries}])\n"
+        "\n"
+        f"{_PLACEHOLDER_HEADING}\n"
+        "- extract: fills browse.extract; demonstrated value: 'the date the trail reopens'\n"
+        "- queries: fills browse.queries[0] and browse.queries[0] and browse.queries[0]; "
+        "demonstrated value: 'ridgeline.example/trailhead-conditions'\n"
+        "- extract-2: fills browse.extract; "
+        "demonstrated value: 'the reopening date for the trail'\n"
+        "- extract-3: fills browse.extract; demonstrated value: 'everything on the page'"
+    ),
+)
+
+
+# ── The PORTED set: five cases, each one demonstration in five wordings ───────
 #
 # THE ARM IS THE DEMONSTRATING UTTERANCE, and the LEDGER is held constant across the five.
 # Distillation is deterministic Python over the calls, so identical calls mean identical spots
@@ -406,6 +512,16 @@ _SECOND_SOURCE = "queries-2"
 # one base name, which is what makes a collapse onto a single name possible here and nowhere
 # else in the set.
 _LONGER_ROUTINE_COLLECTIONS = ("memory", "memory-2")
+
+# The repeating-value ledger's three extract spots, pairwise, by the same current-name
+# convention — the one axis the case can still claim distinctness over (#2361): ``queries``
+# is offered ONCE (the identical value collapses it), so the only spots left that could
+# collapse into each other are these three, two of them near-paraphrases of the same fact.
+_REPEATED_VALUE_EXTRACT_PAIRS = (
+    ("extract", "extract-2"),
+    ("extract", "extract-3"),
+    ("extract-2", "extract-3"),
+)
 
 
 class PortedNamingCase(NamedTuple):
@@ -533,6 +649,29 @@ LONGER_ROUTINE_CASE = PortedNamingCase(
     ),
 )
 
+REPEATED_VALUE_CASE = PortedNamingCase(
+    case_id=_REPEATED_VALUE.case_id,
+    behaviour=_behaviour(
+        "a demonstrated routine reads one page three times with the identical "
+        "demonstrated value, offering three extract spots where two are "
+        "near-paraphrases of the same fact and the third is a broad fallback",
+        f"{_NAMES_EVERY_SPOT}, and never collapses the near-paraphrased extracts into one name",
+    ),
+    ledger=_REPEATED_VALUE,
+    arms=(
+        _REPEATED_VALUE.utterance,
+        "go to ridgeline.example/trailhead-conditions and find out when the trail "
+        "reopens, then keep that",
+        "check ridgeline.example/trailhead-conditions for the trail's reopening date and save it",
+        "have a look at ridgeline.example/trailhead-conditions, work out when the "
+        "trail reopens, and remember that",
+        "visit ridgeline.example/trailhead-conditions, see when the trail reopens, "
+        "and note it down",
+    ),
+    offered=("extract", "queries", "extract-2", "extract-3"),
+    anchors=("ridgeline.example/trailhead-conditions",),
+)
+
 # Every ported case, for the deterministic arm probe in ``make check`` — one place, so the
 # probe and the live runs can never be checking two different sets of arms.
 PORTED_CASES = (
@@ -540,6 +679,7 @@ PORTED_CASES = (
     SEARCH_CASE,
     SINGLE_TURN_CASE,
     LONGER_ROUTINE_CASE,
+    REPEATED_VALUE_CASE,
 )
 
 
@@ -884,6 +1024,65 @@ async def test_a_longer_routine_names_every_spot_however_it_is_worded(
     _measure_what_each_spot_was_called(cohort, LONGER_ROUTINE_CASE.offered)
 
 
+@pytest.mark.parametrize("model", EVAL_MODELS)
+async def test_a_value_that_repeats_is_still_named_once_however_it_is_worded(
+    labeller_eval: LabellerEval, model: str
+) -> None:
+    """One demonstration in five wordings: read one page three times with the identical
+    demonstrated value, offering three extract spots — two near-paraphrases of the same
+    fact, one a generic fallback (#2361).
+
+    **This ledger is read VERBATIM off the namer's slowest reference-run draw**
+    (``transition-elicit-to-learn-absent-5``, ``promptlog`` id 12, ``agent_name=
+    'skill-namer'``), not invented from a description: three ``browse`` calls against one
+    page, confirmed by a scratch replay (10 samples against the live model) to reproduce —
+    115s median against the namer's ordinary ~32s, 10/10 re-quoting "Two spots are never
+    the same spot" after already satisfying it.  Every other ledger in the set pairs two
+    DIFFERENT values under one shared argument name (the two-source case, the longer
+    routine's two collections); this is the only one where a value repeats BYTE-IDENTICAL
+    across call sites.  ``distill_steps`` collapses that into ONE shared parameter
+    spanning every site it fills, so ``queries`` is offered ONCE, attributed to three
+    sites — a shape nothing in the ported set measured before #2361.
+
+    The real draw's demonstrating ask says "and keep it", but nothing in the certified
+    routine wrote anywhere — this ledger keeps that mismatch rather than inventing a
+    write step the original never had.
+
+    **The two shared claims every naming case makes, plus the one THIS ledger earns**:
+    ``extract``, ``extract-2`` and ``extract-3`` each carry a genuinely different fact
+    (two phrasings of one reopening date, plus a broad "everything" read), so a draw that
+    let any pair collapse into one name has lost a spot the ledger meant to keep apart —
+    checked pairwise across all three, the way the two-source and longer-routine cases
+    check their own pair, reached by a different road: there, two call sites coinciding in
+    ARGUMENT NAME; here, three call sites coinciding in VALUE on one of them (``queries``)
+    while the other three stay genuinely distinct.
+
+    **No claim asks whether the shared ``queries`` spot drew ONE name** — the production
+    validator already guarantees it (a split reads as a name nobody offered and is refused
+    and re-rolled), so asserting it would run 15/15 by construction, same reasoning the
+    module docstring gives for every other ledger. What this case is FOR is the measured
+    side: token cost and naming-spread read against the reference run's and the replay's
+    numbers.
+
+    **LANDED is empty and closed upstream** (``_labels_every_spot`` validates coverage and
+    re-rolls); **STORE is empty by construction** (one call, a typed result, no store).
+    The provenance block carries only the *nothing omitted* direction, for the reason
+    every other case in this file gives.
+    """
+    cohort = await _run_ported_case(labeller_eval, REPEATED_VALUE_CASE, model)
+    # LANDED — empty, and closed upstream; see the docstring.
+    # STORE — empty by construction; see the docstring.
+    # PROVENANCE — the OPEN fields, which for this shape are the whole typed result.
+    _claim_every_spot_was_named_for_this_routine(cohort, REPEATED_VALUE_CASE.offered)
+    for pair in _REPEATED_VALUE_EXTRACT_PAIRS:
+        cohort.claim(
+            f"state: {pair[0]} and {pair[1]} drew different names",
+            _distinct_names(pair),
+            SpecCategory.PROVENANCE,
+        )
+    _measure_what_each_spot_was_called(cohort, REPEATED_VALUE_CASE.offered)
+
+
 # Every ledger, for the deterministic drift probes in ``make check`` — one place, so the
 # probes and the live runs can never be checking two different fixtures.
 FIXTURES = (
@@ -891,4 +1090,5 @@ FIXTURES = (
     _SINGLE_TURN,
     _SEARCH,
     _LONGER_ROUTINE,
+    _REPEATED_VALUE,
 )
