@@ -18,6 +18,7 @@ import {
   type RunHealth,
   type RunHealthFlag,
   type RunOutcome,
+  type RuntimeCallStarted,
   type RuntimeCollectionTriggerResult,
   type RuntimeConfigParam,
   type RuntimeMemoryDetailResponse,
@@ -25,6 +26,8 @@ import {
   type RuntimeMemorySaveError,
   type RuntimeMessage,
   RuntimeMessageType,
+  type RuntimeToolFinished,
+  type RuntimeToolStarted,
   STORAGE_KEY_DOMAIN_ALLOWLIST,
   STORAGE_KEY_TOOL_USE,
 } from "../protocol.js";
@@ -34,11 +37,20 @@ import {
   agentLabel,
   attachmentIndex,
   dedupeDraws,
+  type DrawTreeEntry,
   type DrawTreeNode,
   directChildNodes,
+  dropRunningCalls,
+  dropRunningTools,
   expandedIdsAfterRebuild,
+  fetchedRunIdsFrom,
   isAnchored,
+  isRunningCall,
+  isRunningTool,
   moveToFront,
+  type RunningCall,
+  type RunningTool,
+  runningRunIdClosure,
   rowStartedAt,
   runTimingWindow,
   toolCallIds,
@@ -99,6 +111,22 @@ let promptsLoaded = false;
 // step never arrives (the user switched away) doesn't linger forever.
 const pendingDrawsByParentRun = new Map<string, PromptLogEntry[]>();
 const pendingDrawsByStep = new Map<string, Map<string, PromptLogEntry[]>>();
+
+// Live step markers (#2439) — running calls and tool calls, pushed ahead of
+// any promptlog row.  Flat arrays, not attached into any run's own state the
+// way a draw is: `directChildNodes` (draw_nesting.ts) is fed these two arrays
+// alongside the logged draws, and recomputes the WHOLE tree fresh at every
+// render — any depth, a running call nested under another running call
+// included — so there is nothing to hold-and-drain here — a running call
+// whose host isn't on screen yet simply isn't rendered until the host's own
+// render (for any reason) picks it up.  Resolved three ways, never left
+// spinning: the real record arrives (its own run_id is dropped), the run's
+// OWN outcome arrives (the whole closure under it is dropped — an abandoned
+// nested draw included), or a fetch brings the run in (dropped by
+// `fetchedRunIdsFrom`, same as a reconnect).
+let runningCalls: RunningCall[] = [];
+let runningTools: RunningTool[] = [];
+let tickTimer: ReturnType<typeof setInterval> | null = null;
 
 // --- Memories state ---
 
@@ -188,6 +216,12 @@ function handleMessage(message: RuntimeMessage): void {
     // correct, and so a live-pending duplicate (arrived both ways) is
     // deduped rather than shown twice.
     for (const run of message.runs) reconcilePendingDraws(run);
+    // A fetched run is authoritative for everything it lists — drop any
+    // running placeholder for it or any of its child draws, including one the
+    // live push never resolved (the call started before this page connected).
+    const fetchedRunIds = fetchedRunIdsFrom(message.runs);
+    runningCalls = dropRunningCalls(runningCalls, fetchedRunIds);
+    runningTools = dropRunningTools(runningTools, fetchedRunIds);
     if (message.runs.length > 0 && allRuns.length > 0) {
       appendRuns(message.runs);
     } else {
@@ -200,6 +234,12 @@ function handleMessage(message: RuntimeMessage): void {
     handlePromptUpdate(message.prompt);
   } else if (message.type === RuntimeMessageType.RunOutcomeUpdate) {
     handleRunOutcome(message.run_id, message.outcome, message.reason);
+  } else if (message.type === RuntimeMessageType.CallStarted) {
+    handleCallStarted(message);
+  } else if (message.type === RuntimeMessageType.ToolStarted) {
+    handleToolStarted(message);
+  } else if (message.type === RuntimeMessageType.ToolFinished) {
+    handleToolFinished(message);
   } else if (message.type === RuntimeMessageType.ConfigResponse) {
     renderConfig(message.params);
     if (pendingConfigSave) {
@@ -288,6 +328,9 @@ function setupPrompts(): void {
         runElements.clear();
         pendingDrawsByParentRun.clear();
         pendingDrawsByStep.clear();
+        runningCalls = [];
+        runningTools = [];
+        stopTicking();
         promptsLoadMore.classList.add("hidden");
         promptsLoading.textContent = promptSearch ? "Searching…" : "Loading prompt logs…";
         promptsLoading.classList.remove("hidden");
@@ -302,6 +345,11 @@ function resetAndFetchPrompts(): void {
   allRuns = [];
   pendingDrawsByParentRun.clear();
   pendingDrawsByStep.clear();
+  // A reconnect/refetch drops every running placeholder — the fetched state
+  // wins (#2439); nothing is ever left spinning on a view that moved on.
+  runningCalls = [];
+  runningTools = [];
+  stopTicking();
   requestPromptLogs(0);
 }
 
@@ -323,6 +371,12 @@ function requestPromptLogs(offset: number): void {
 // rides along with whatever its host run's filter status already resolved,
 // so it's never checked against the filter itself.
 function handlePromptUpdate(prompt: PromptLogEntry): void {
+  // This call's own running placeholder (#2439), if any, is superseded by
+  // the real record that just arrived — drop it before rendering so the two
+  // are never shown at once.
+  const hadRunningCall = runningCalls.some((call) => call.runId === prompt.run_id);
+  if (hadRunningCall) runningCalls = dropRunningCalls(runningCalls, new Set([prompt.run_id]));
+
   if (prompt.parent_run_id !== null) {
     attachDraw(prompt);
     return;
@@ -332,6 +386,9 @@ function handlePromptUpdate(prompt: PromptLogEntry): void {
   const existingRun = allRuns.find((r) => r.run_id === prompt.run_id);
   if (existingRun) {
     updateExistingRun(existingRun, prompt);
+    // updateExistingRun appends incrementally; a resolved running placeholder
+    // needs the full rebuild to actually disappear from the DOM.
+    if (hadRunningCall) rerenderHostBody(existingRun);
   } else {
     insertNewRun(prompt);
   }
@@ -421,6 +478,26 @@ function findContainer(runId: string): { host: PromptLogRun; ownRows: PromptLogE
     if (run.run_id === runId) return { host: run, ownRows: run.prompts };
     const rows = (run.child_draws ?? []).filter((draw) => draw.run_id === runId);
     if (rows.length > 0) return { host: run, ownRows: rows };
+  }
+  return null;
+}
+
+/** The top-level host whose body-render would (eventually) reach `runId` —
+ * real right away via `findContainer`, or by climbing a chain of running
+ * calls' own `parentRunId` (#2439), any depth: a running call's parent can
+ * itself be another running call, logged or not, exactly as a logged draw's
+ * parent can be another draw.  `null` only while the WHOLE chain up to a
+ * real run is still pending — nothing is lost even then: `runningCalls` is a
+ * flat, recomputed-fresh array, never consumed, so the next render the real
+ * ancestor triggers for ANY reason (its own resolution, a sibling arriving)
+ * picks up every running descendant still waiting on it, same as this call
+ * would have. */
+function findHostFor(runId: string): PromptLogRun | null {
+  const direct = findContainer(runId);
+  if (direct) return direct.host;
+  const asRunningCall = runningCalls.find((call) => call.runId === runId);
+  if (asRunningCall && asRunningCall.parentRunId !== null) {
+    return findHostFor(asRunningCall.parentRunId);
   }
   return null;
 }
@@ -532,6 +609,137 @@ function drainWaitingOn(arrived: PromptLogEntry): void {
   if (byStep.size === 0) pendingDrawsByStep.delete(arrived.run_id);
 }
 
+// --- Live step markers (#2439) ---
+//
+// Unlike a draw, a running call/tool is never "attached" into any host's own
+// state (`directChildNodes` in draw_nesting.ts recomputes the match fresh,
+// at any depth, every render) — so there is no per-entry hold-and-drain map
+// the way `pendingDrawsByParentRun` is for a draw. The one thing a render
+// still needs on arrival is WHICH top-level host to rerender, which is what
+// `findHostFor` resolves — climbing through running ancestors, any depth,
+// when the immediate parent isn't a real row yet. A host that still isn't
+// reachable at all (the whole chain pending) simply isn't rendered THIS
+// moment; nothing is lost (`runningCalls` is never consumed), and the next
+// render the real ancestor triggers for any reason catches every running
+// descendant still waiting on it. See `runningCalls`/`runningTools`'s own
+// comment for the three resolution paths.
+
+/** A model call is about to be made (#2439).  `parent_run_id === null` is
+ * this run's OWN next step — if the run itself isn't on screen yet (the
+ * run's very first call), a minimal shell row is created for it now, exactly
+ * where `insertNewRun` would create one for its first LOGGED prompt. */
+function handleCallStarted(msg: RuntimeCallStarted): void {
+  const call: RunningCall = {
+    runId: msg.run_id,
+    parentRunId: msg.parent_run_id,
+    parentToolCallId: msg.parent_tool_call_id,
+    agentName: msg.agent_name,
+    promptType: msg.prompt_type,
+    model: msg.model,
+    runTarget: msg.run_target,
+    startedAt: msg.started_at,
+  };
+  runningCalls = [...runningCalls, call];
+  startTicking();
+
+  if (call.parentRunId === null) {
+    if (activeAgentFilter && (call.agentName ?? "") !== activeAgentFilter) return;
+    const existingRun = allRuns.find((r) => r.run_id === call.runId);
+    if (existingRun) {
+      bringRunToFront(existingRun);
+    } else {
+      insertShellRun(call);
+    }
+    return;
+  }
+
+  const host = findHostFor(call.parentRunId);
+  if (host) rerenderHostBody(host);
+}
+
+/** A dispatched tool call is about to run (#2439) — its host run already
+ * exists (dispatch only follows the model's own logged response), so this
+ * never needs the hold-and-drain a draw does. */
+function handleToolStarted(msg: RuntimeToolStarted): void {
+  runningTools = [
+    ...runningTools,
+    {
+      runId: msg.run_id,
+      toolCallId: msg.tool_call_id,
+      toolName: msg.tool_name,
+      status: msg.status,
+      startedAt: msg.started_at,
+    },
+  ];
+  startTicking();
+  const container = findContainer(msg.run_id);
+  if (container) rerenderHostBody(container.host);
+}
+
+/** A dispatched tool call just finished (#2439) — flips its row from a
+ * spinner to a checkmark/x in place; it is dropped later, alongside
+ * everything else, by whichever resolution path clears its run_id. */
+function handleToolFinished(msg: RuntimeToolFinished): void {
+  runningTools = runningTools.map((tool) =>
+    tool.runId === msg.run_id && tool.toolCallId === msg.tool_call_id
+      ? { ...tool, finishedSuccess: msg.success }
+      : tool,
+  );
+  const container = findContainer(msg.run_id);
+  if (container) rerenderHostBody(container.host);
+}
+
+/** A brand-new top-level run's minimal shell — created the moment its FIRST
+ * call starts, exactly where `insertNewRun` creates a row for its first
+ * LOGGED prompt.  `updateExistingRun` (unmodified) is what later turns this
+ * into a real run, the instant that first prompt logs: it just pushes onto
+ * what is, for now, an empty `prompts` array. */
+function insertShellRun(call: RunningCall): void {
+  const run: PromptLogRun = {
+    run_id: call.runId,
+    agent_name: call.agentName ?? "",
+    prompt_count: 0,
+    started_at: call.startedAt,
+    ended_at: call.startedAt,
+    total_duration_ms: 0,
+    wall_duration_ms: 0,
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    run_outcome: null,
+    run_reason: null,
+    run_target: call.runTarget,
+    health: {
+      bailed: false,
+      no_writes: false,
+      incomplete: false,
+      tool_failures: 0,
+      degenerate_send: false,
+      flags: [],
+      regressive: false,
+    },
+    record: "",
+    prompts: [],
+    child_draws: [],
+  };
+  allRuns.unshift(run);
+  promptsLoading.classList.add("hidden");
+  const row = createRunRow(run);
+  runsContainer.prepend(row);
+  markRunActive(run.run_id, row);
+}
+
+/** Re-render `run`'s body (picking up whatever running entries now apply),
+ * move it to the top of the list, and keep its active-run spinner alive. */
+function bringRunToFront(run: PromptLogRun): void {
+  rerenderHostBody(run);
+  allRuns = moveToFront(allRuns, run.run_id);
+  const row = runElements.get(run.run_id);
+  if (row) {
+    runsContainer.prepend(row);
+    markRunActive(run.run_id, row);
+  }
+}
+
 function rerenderHostBody(host: PromptLogRun): void {
   const row = runElements.get(host.run_id);
   if (!row) return;
@@ -586,9 +794,18 @@ function handleRunOutcome(runId: string, outcome: RunOutcome, reason: string): v
   run.run_reason = reason;
   allRuns = moveToFront(allRuns, runId);
 
+  // A run's OWN outcome resolves every running placeholder under it (#2439),
+  // not only one whose own record happened to arrive first — an abandoned
+  // nested draw (a crash mid-call) is still cleared, so nothing is left
+  // spinning once the run itself is known to be over.
+  const closure = runningRunIdClosure(runId, runningCalls);
+  runningCalls = dropRunningCalls(runningCalls, closure);
+  runningTools = dropRunningTools(runningTools, closure);
+
   const row = runElements.get(runId);
   if (!row) return;
   runsContainer.prepend(row);
+  rerenderHostBody(run);
 
   const summary = row.querySelector(".run-summary");
   if (summary) {
@@ -765,7 +982,11 @@ function appendPromptsAndDraws(
   ownRunId: string,
   allDraws: PromptLogEntry[],
 ): void {
-  const nodes = directChildNodes(ownRunId, ownRows, allDraws);
+  // Live step markers (#2439) feed into the SAME tree build a logged draw
+  // always went through — never a parallel one-level path — so a running
+  // call or tool nests at any depth exactly like a logged draw would,
+  // including one whose own parent is itself still running.
+  const nodes = directChildNodes(ownRunId, ownRows, allDraws, runningCalls, runningTools);
   const byStep = new Map<number, DrawTreeNode[]>();
   const unanchored: DrawTreeNode[] = [];
   for (const node of nodes) {
@@ -776,22 +997,40 @@ function appendPromptsAndDraws(
     if (!byStep.has(node.stepIndex)) byStep.set(node.stepIndex, []);
     byStep.get(node.stepIndex)!.push(node);
   }
+
+  // This run's OWN next call in flight is not a "child" in the tree sense
+  // (nothing is parented ON it yet) — it's the run's own next row, rendered
+  // separately, after its known steps, since it has no step of its own yet.
+  const ownRunningCall = runningCalls.find((call) => call.runId === ownRunId);
+
   for (let i = 0; i < ownRows.length; i++) {
     target.appendChild(createPromptRow(ownRows[i], i + 1));
     for (const node of byStep.get(i) ?? []) appendDrawNode(target, node);
   }
   for (const node of unanchored) appendDrawNode(target, node);
+  if (ownRunningCall) target.appendChild(createRunningCallRow(ownRunningCall));
+  if (nodes.length > 0 || ownRunningCall) startTicking();
 }
 
-// One draw row plus its own already-built children (#2435), indented one
-// level deeper per nesting level via `.prompt-draw-children`'s own CSS.
+// One tree node's own row plus its own already-built children (#2435,
+// extended to running entries by #2439), indented one level deeper per
+// nesting level via `.prompt-draw-children`'s own CSS — recursion doesn't
+// care whether a level is logged or still running.
 function appendDrawNode(target: HTMLElement, node: DrawTreeNode): void {
-  target.appendChild(createDrawRow(node.draw));
+  target.appendChild(createAnyDrawRow(node.draw));
   if (node.children.length === 0) return;
   const nested = document.createElement("div");
   nested.className = "prompt-draw-children";
   target.appendChild(nested);
   for (const child of node.children) appendDrawNode(nested, child);
+}
+
+// Dispatches a tree entry to its own row renderer by kind (#2439) — a logged
+// draw, a running call, or a running tool call.
+function createAnyDrawRow(entry: DrawTreeEntry): HTMLElement {
+  if (isRunningTool(entry)) return createRunningToolRow(entry);
+  if (isRunningCall(entry)) return createRunningCallRow(entry);
+  return createDrawRow(entry);
 }
 
 // A draw's own row — the same prompt-row component every top-level step
@@ -803,6 +1042,104 @@ function createDrawRow(draw: PromptLogEntry): HTMLElement {
   const row = createPromptRow(draw, agentLabel(draw.agent_name));
   row.classList.add("prompt-draw");
   return row;
+}
+
+// --- Live step markers (#2439) ---
+
+// Seconds elapsed since `startedAt`, as a short label — never negative (a
+// clock a hair ahead of the server's own would otherwise read "-1s").
+function formatElapsed(startedAt: string): string {
+  const elapsedMs = Date.now() - new Date(startedAt).getTime();
+  return `${Math.max(0, Math.floor(elapsedMs / 1000))}s`;
+}
+
+// A running model call's own row — a spinner, its agent/model identity, and a
+// ticking elapsed time (`.running-elapsed`, read by the one shared interval
+// `startTicking` drives — never a per-row timer).
+function createRunningCallRow(call: RunningCall): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "prompt prompt-running";
+
+  const header = document.createElement("div");
+  header.className = "prompt-header";
+
+  const iconEl = document.createElement("span");
+  iconEl.className = "prompt-tools";
+  iconEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+  header.appendChild(iconEl);
+
+  const label = document.createElement("span");
+  label.className = "prompt-snippet";
+  label.textContent = `${agentLabel(call.agentName || call.promptType || "model")} — ${call.model}`;
+  header.appendChild(label);
+
+  header.appendChild(createRunningElapsed(call.startedAt));
+  row.appendChild(header);
+  return row;
+}
+
+// A running (or just-finished) tool call's own row — spinner while running,
+// a checkmark/x once `tool_finished` arrives (`finishedSuccess` set); the
+// elapsed timer stops ticking the moment it resolves rather than freezing a
+// stale number, by simply not being rendered once `finishedSuccess` is set.
+function createRunningToolRow(tool: RunningTool): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "prompt prompt-running prompt-draw";
+
+  const header = document.createElement("div");
+  header.className = "prompt-header";
+
+  const iconEl = document.createElement("span");
+  iconEl.className = "prompt-tools";
+  if (tool.finishedSuccess === undefined) {
+    iconEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+  } else {
+    iconEl.innerHTML = tool.finishedSuccess
+      ? '<i class="fa-solid fa-check"></i>'
+      : '<i class="fa-solid fa-xmark"></i>';
+  }
+  header.appendChild(iconEl);
+
+  const label = document.createElement("span");
+  label.className = "prompt-snippet";
+  label.textContent = tool.status;
+  header.appendChild(label);
+
+  if (tool.finishedSuccess === undefined) header.appendChild(createRunningElapsed(tool.startedAt));
+  row.appendChild(header);
+  return row;
+}
+
+function createRunningElapsed(startedAt: string): HTMLElement {
+  const elapsed = document.createElement("span");
+  elapsed.className = "prompt-start running-elapsed";
+  elapsed.dataset.startedAt = startedAt;
+  elapsed.textContent = formatElapsed(startedAt);
+  return elapsed;
+}
+
+// One shared ticking interval for every running row on screen at once — never
+// a timer per row — started the moment any running row renders, and stopped
+// for good once a tick finds none left (every one resolved or was dropped).
+function startTicking(): void {
+  if (tickTimer !== null) return;
+  tickTimer = setInterval(() => {
+    const spans = document.querySelectorAll<HTMLElement>(".running-elapsed");
+    if (spans.length === 0) {
+      stopTicking();
+      return;
+    }
+    for (const span of Array.from(spans)) {
+      const startedAt = span.dataset.startedAt;
+      if (startedAt) span.textContent = formatElapsed(startedAt);
+    }
+  }, 1000);
+}
+
+function stopTicking(): void {
+  if (tickTimer === null) return;
+  clearInterval(tickTimer);
+  tickTimer = null;
 }
 
 // A "Prompts | Record" tab bar that swaps which view panel is active.
