@@ -30,10 +30,8 @@ import penny as penny_package
 from penny.agents.collector import Collector
 from penny.clock import Clock
 from penny.constants import ChannelType, PennyConstants, TransitionCause
-from penny.conversation_machine import ConversationState
 from penny.database import Database
 from penny.database.memory import EntryInput, LogEntryInput
-from penny.database.skills import SkillDraft
 from penny.datetime_utils import current_datetime_line
 from penny.llm.client import LlmClient
 from penny.tests.conftest import TEST_SENDER, require_memory
@@ -153,12 +151,6 @@ def _write_through_every_store(db: Database) -> None:
     rule = db.email_rules.create(PennyConstants.PROVIDER_ZOHO, "a rule", "{}", "{}")
     db.email_rules.mark_applied(rule.id or 0)
     db.media.put(b"bytes", "image/png")
-    db.skills.upsert(
-        SkillDraft(
-            name="a routine", intent="i", description="d", steps=[], parameters=[], source_run_id=""
-        ),
-        author="chat",
-    )
     for name in ("Someone", "Someone Else"):
         db.users.save_info("+15550009999", name, "Seattle, WA", SAMPLE_TIMEZONE, "1990-01-01")
     db.users.set_muted("+15550009999")
@@ -331,13 +323,22 @@ def _a_turn_that_stood_a_job_up(
     The classifier draws, the machine lands in apply, and the job is stood up on ``rule``
     with the end ``ends`` says — resolved by the function ``collection_configure`` resolves it
     with, against the same database, so the instant the words are counted from is the one
-    production counts them from."""
+    production counts them from.
+
+    ``turn_at`` is read off the last scripted message ``TEST_SENDER`` sent (#2496 naive
+    baseline: there is no conversation machine, so no transition row's ``created_at``
+    carries it), so this logs that ask before the turn's own draws."""
     db = migrated_db(str(tmp_path / f"{name}.db"), clock=_pinned_at(starts_at))
     seed_user(db)
+    db.messages.log_message(
+        direction=PennyConstants.MessageDirection.INCOMING,
+        sender=TEST_SENDER,
+        content="watch this and stand up the job",
+    )
     _log_draw(db, PennyConstants.STATE_CLASSIFIER_AGENT_NAME, "STATE: apply")
     db.machine.record_transition(
-        from_state=ConversationState.LEARN.value,
-        to_state=ConversationState.APPLY.value,
+        from_state="learn",
+        to_state="apply",
         cause=TransitionCause.CLASSIFIER,
     )
     schedule = parse_schedule(rule)

@@ -33,18 +33,9 @@ from penny.database.models import (
     MessageLog,
     MutationEvent,
     PromptLog,
-    Skill,
     UserInfo,
 )
 from penny.database.mutation_store import MutationDetail
-from penny.database.skill_store import parameters_to_json, steps_to_json
-from penny.database.skills import (
-    WRITE_TARGET_DESCRIPTION,
-    SkillParameter,
-    SkillStep,
-    SkillSubKind,
-    SkillSubstitution,
-)
 from penny.prompts import Prompt
 
 USER = "+15550001111"
@@ -133,89 +124,6 @@ def _add_written_entry(
             created_at=when,
             created_by_run_id=created_run_id if created_run_id is not None else run_id,
             last_written_by_run_id=run_id,
-        )
-    )
-
-
-# Two taught-skill fixtures with real recipes, so the Skills-and-rules section's
-# FULL-recipe render (#1665) is exercised — holes + numbered steps, not just name.
-_TRACK_SHIPMENT_STEPS = steps_to_json(
-    [
-        SkillStep(
-            ordinal=1,
-            source_ordinal=1,
-            tool="browse",
-            arguments={"queries": ["1Z-DEMO"]},
-            substitutions=[
-                SkillSubstitution(path=["queries", 0], kind=SkillSubKind.HOLE, parameter="tracking")
-            ],
-        )
-    ]
-)
-_TRACK_SHIPMENT_HOLES = parameters_to_json([SkillParameter(name="tracking", required=True)])
-# Two steps, so the AMBIENT render (the 0-call firing surface) covers a scoped WRITE:
-# its target is the #1777 placeholder, and the collection the skill was demonstrated
-# against must never appear here — no instantiation runs on this surface to retarget it.
-_WATCH_FIELD_STEPS = steps_to_json(
-    [
-        SkillStep(
-            ordinal=1,
-            source_ordinal=1,
-            tool="browse",
-            arguments={"queries": ["https://shop.test/widget"]},
-            substitutions=[
-                SkillSubstitution(path=["queries", 0], kind=SkillSubKind.HOLE, parameter="url")
-            ],
-        ),
-        SkillStep(
-            ordinal=2,
-            source_ordinal=2,
-            tool="collection_write",
-            arguments={
-                "collection": "demonstrated-on-collection",
-                "entries": [{"key": "price", "content": "$19"}],
-            },
-            substitutions=[
-                SkillSubstitution(
-                    path=["collection"],
-                    kind=SkillSubKind.PLACEHOLDER,
-                    description=WRITE_TARGET_DESCRIPTION,
-                    attachment=True,
-                ),
-                SkillSubstitution(
-                    path=["entries", 0, "content"], kind=SkillSubKind.BINDING, step=1
-                ),
-            ],
-        ),
-    ]
-)
-_WATCH_FIELD_HOLES = parameters_to_json([SkillParameter(name="url", required=True)])
-
-
-def _add_skill(
-    session: Session,
-    *,
-    name: str,
-    intent: str,
-    when: datetime,
-    steps: str = "[]",
-    parameters: str = "[]",
-) -> None:
-    """A taught skill (the ``skill`` registry, #1590) — the taught-skill feed of the
-    Skills-and-rules section, which renders one ROW per skill (#1804,
-    ``render_skill_brief``: what it's for and what it needs).  Pass real
-    ``steps``/``parameters`` JSON so a test can show the steps stay OUT of the
-    ambient render while the parameters come through."""
-    session.add(
-        Skill(
-            name=name,
-            steps=steps,
-            parameters=parameters,
-            intent=intent,
-            description=intent,
-            author="chat",
-            created_at=when,
-            updated_at=when,
         )
     )
 
@@ -414,25 +322,6 @@ def _seed_kitchen_sink(db: Database) -> None:
             updated_at=_t(6),
         )
         _add_entries(session, "favorites", 2, when=_t(7))
-        # The Skills-and-rules section's one feed (#1471/#1624): the taught-skill
-        # registry (the sole skills store — the legacy ``skills`` collection's
-        # standing-rules feed retired with the collection, migration 0092).
-        _add_skill(
-            session,
-            name="Track a shipment",
-            intent="track my package from acme and tell me when it moves",
-            when=_t(7),
-            steps=_TRACK_SHIPMENT_STEPS,
-            parameters=_TRACK_SHIPMENT_HOLES,
-        )
-        _add_skill(
-            session,
-            name="Watch a page field",
-            intent="watch the price on a product page and ping me when it drops",
-            when=_t(7),
-            steps=_WATCH_FIELD_STEPS,
-            parameters=_WATCH_FIELD_HOLES,
-        )
         _add_run(
             session,
             run_id="7f3a1b2c",
@@ -629,6 +518,113 @@ def test_self_state_archived_heavy_render(db):
     assert actual == _ARCHIVED_HEAVY
 
 
+# ── 4a. The instructions line — what a live job reads and follows (#2495) ──
+
+
+# First, test for a sentence longer than the cap (single-sentence prompt)
+def test_self_state_job_instructions_first_sentence_over_cap(db):
+    """When the FIRST sentence itself is cut because it's longer than the cap,
+    the note reads '(the rest is cut — memory_get(...) shows the whole prompt)'
+    instead of '(0 more sentences cut — ...)'."""
+    # Create a prompt with a single sentence much longer than the cap
+    # (no periods to avoid creating sentence boundaries)
+    long_words = "this is a very long instruction with many words that goes on and on "
+    long_sentence = "1. " + (long_words * 5) + "done"
+    with Session(db.engine) as session:
+        _add_collection(
+            session,
+            "long-instruction",
+            description="job with long single sentence",
+            extraction_prompt=long_sentence,
+            schedule="FREQ=HOURLY",
+            created_at=_t(6),
+            updated_at=_t(6),
+        )
+        session.commit()
+    actual = SelfStateHeader(db, None).render()
+    # Should render with "the rest is cut" not "0 more sentences cut"
+    assert "the rest is cut" in actual
+    assert "0 more sentences cut" not in actual
+
+
+def test_self_state_job_instructions_url_with_trailing_punctuation(db):
+    """The page URL is stripped of trailing punctuation so 'https://example.com.'
+    renders as 'https://example.com' not with the period."""
+    with Session(db.engine) as session:
+        _add_collection(
+            session,
+            "url-with-period",
+            description="instruction ending with URL followed by period",
+            extraction_prompt="1. read the page at https://example.com. then analyze it.",
+            schedule="FREQ=HOURLY",
+            created_at=_t(6),
+            updated_at=_t(6),
+        )
+        session.commit()
+    actual = SelfStateHeader(db, None).render()
+    # The URL should appear without the trailing period
+    assert "reads https://example.com —" in actual
+    assert "reads https://example.com. —" not in actual
+
+
+def test_self_state_job_instructions_line_shapes(db):
+    """Every shape of the hung instructions line (#2495) in one render: a job whose
+    prompt names a page renders ``reads <first-url> — "<instructions>"``; a job whose
+    prompt fits the character budget renders it whole with no cut note; a job whose
+    prompt runs past the budget renders its first sentence plus the cut note, which
+    counts the sentences dropped and names the ``memory_get`` hop to the whole prompt —
+    while the ``reads`` clause still shows the page that dropped sentence named, since
+    the URL is read off the FULL prompt; a prompt with no URL renders the quoted
+    instructions alone; and an inert collection (no prompt) renders no second line at
+    all, here and nowhere."""
+    with Session(db.engine) as session:
+        _add_collection(
+            session,
+            "feed-check",
+            description="check the feed",
+            extraction_prompt=(
+                "1. read https://harborferries.example/feed each morning and write the headlines."
+            ),
+            schedule="FREQ=HOURLY",
+            created_at=_t(6),
+            updated_at=_t(6),
+        )
+        _add_collection(
+            session,
+            "harbour-watch",
+            description="watch the harbour notices",
+            extraction_prompt=(
+                "1. read the harbour notice board each morning before the first "
+                "sailing. 2. find the night sailing's departure time on "
+                "https://harborferries.example/seasonal-sailings and write it with the "
+                "date you read it on. 3. if the page carries no night sailing at all, "
+                "write that instead — an empty result is a result."
+            ),
+            schedule="FREQ=HOURLY",
+            created_at=_t(6),
+            updated_at=_t(6),
+        )
+        _add_collection(
+            session,
+            "plain-note",
+            description="count the boats",
+            extraction_prompt="1. count the boats in the harbour.",
+            schedule="FREQ=HOURLY",
+            created_at=_t(6),
+            updated_at=_t(6),
+        )
+        _add_collection(
+            session,
+            "keepsakes",
+            description="things worth keeping",
+            created_at=_t(6),
+            updated_at=_t(6),
+        )
+        session.commit()
+    actual = SelfStateHeader(db, None).render()
+    assert actual == _INSTRUCTION_SHAPES
+
+
 # ── 4b. No cap — the whole registry renders, archived names index (#2288) ─
 
 
@@ -708,51 +704,6 @@ def test_self_state_no_archived_line_when_nothing_archived(db):
         session.commit()
     actual = SelfStateHeader(db, None).render()
     assert "archived:" not in actual
-
-
-# ── 4c. Skills-and-rules section — the taught-skill feed (#1471/#1624) ────
-#
-# The populated shape is pinned here and in the kitchen sink; the empty shape
-# (the fresh-install default — migration 0084 ships the taught-skill table
-# empty) is the empty deployment's placeholder.  The taught-skill registry is
-# the section's ONLY feed: the legacy ``skills`` collection's standing-rules
-# feed retired with the collection (#1624, migration 0092).
-
-
-def test_self_state_taught_skills_only_render(db):
-    """The taught-skill registry renders ONE ROW per skill (#1804) — name, what it's
-    for, what it needs, name order — the section's sole feed, in the same ``- <name>
-    — <clauses>`` shape the sections above it use, so several skills are a list to
-    skim.  What a row does NOT carry is the numbered recipe: this is a 0-call
-    INSTANTIATION surface (the parameter names are the binding keys), not a surface
-    anything is carried out from — the recipe + parameters block is one call away
-    either way (#2287): ``find`` on the routine's own hit, or ``memory_get`` on
-    the job once it is set running."""
-    with Session(db.engine) as session:
-        _add_skill(
-            session,
-            name="Track a shipment",
-            intent="track my package from acme and tell me when it moves",
-            when=_t(7),
-            steps=_TRACK_SHIPMENT_STEPS,
-            parameters=_TRACK_SHIPMENT_HOLES,
-        )
-        _add_skill(
-            session,
-            name="Watch a page field",
-            intent="watch the price on a product page and ping me when it drops",
-            when=_t(7),
-            steps=_WATCH_FIELD_STEPS,
-            parameters=_WATCH_FIELD_HOLES,
-        )
-        session.commit()
-    actual = SelfStateHeader(db, None).render()
-    assert actual == _TAUGHT_SKILLS_ONLY
-    # No recipe reaches this surface at all — so neither the tool-call dialect nor
-    # anything a step's arguments carry (the demonstrated collection #1777 had to
-    # placeholder away) can appear here.
-    assert "browse(" not in actual and "collection_write(" not in actual
-    assert "demonstrated-on-collection" not in actual
 
 
 # ── 4b. Activity-block shape matrix ───────────────────────────────────────
@@ -1147,21 +1098,25 @@ _KITCHEN_SINK = (
     "notifications: on — proactive task notifications are delivered\n"
     "- news-digest — active · every hour (rule: `FREQ=HOURLY`) · notify: off · last run "
     "FAILED 2026-07-11 08:00 UTC\n"
+    '  "1. read the feed"\n'
     "- old-watch — archived 2026-07-11 08:30 UTC · no runs yet\n"
-    "- price-watch — active · every 6 hours (rule: `FREQ=HOURLY;INTERVAL=6`) · notify: on · "
-    "expires Sunday, July 19, 2026 at 08:00 PM EDT · last run WORKED 2026-07-11 09:14 UTC\n"
+    "- price-watch — active · every 6 hours (rule: `FREQ=HOURLY;INTERVAL=6`) · notify: on "
+    "· expires Sunday, July 19, 2026 at 08:00 PM EDT · last run WORKED 2026-07-11 09:14 "
+    "UTC\n"
+    '  "1. browse the page"\n'
     "- reminder — active · once, at Saturday, July 11, 2026 at 08:00 AM EDT, then it "
     "retires (rule: `DTSTART:20260711T120000Z FREQ=DAILY;COUNT=1`) · notify: off · "
     "one-shot · no runs yet\n"
+    '  "1. remind"\n'
     "\n"
     "### Recent activity\n"
     "change · 2026-07-11 09:20 UTC · price-watch updated by user-run (run 66aa0099) — "
     "changed schedule\n"
-    "run 7f3a1b2c · 2026-07-11 09:14 UTC · price-watch → WORKED (3 calls) · "
-    "wrote 'aurora deck 2 price' → `price-watch`\n"
+    "run 7f3a1b2c · 2026-07-11 09:14 UTC · price-watch → WORKED (3 calls) · wrote 'aurora "
+    "deck 2 price' → `price-watch`\n"
     'sent · 2026-07-11 09:05 UTC · price-watch — "Heads up: the price dropped to $42!"\n'
-    "change · 2026-07-11 08:30 UTC · old-watch archived by system — max_runs reached (1 "
-    "of 1)\n"
+    "change · 2026-07-11 08:30 UTC · old-watch archived by system — max_runs reached (1 of "
+    "1)\n"
     "run 88d14e5f · 2026-07-11 08:00 UTC · news-digest → FAILED (2 calls)\n"
     "\n"
     "### Your memory\n"
@@ -1172,24 +1127,15 @@ _KITCHEN_SINK = (
     "- reminder (collection, 0 entries) — one-off reminder\n"
     "archived: `old-watch`\n"
     "\n"
-    "### Known skills\n"
-    "Skills you've been taught — what each one does and what it needs from the user "
-    "to run. For one's full parameters and steps: skill_get('<name>').\n"
-    "- Track a shipment — track my package from acme and tell me when it moves "
-    "(parameters: tracking)\n"
-    "- Watch a page field — watch the price on a product page and ping me when it "
-    "drops (parameters: url)\n"
-    "\n"
     "### About the user\n"
     "- name: Alex\n"
     "- timezone: America/Toronto\n"
     "- location: Toronto, Canada\n"
     "\n"
-    "To look deeper: memory_get(<name>) for a collection's full config and "
-    "change history, run_get(run <id>) for one run's tool calls, "
-    "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
-    "something said in the conversation."
+    "To look deeper: memory_get(<name>) for a collection's full config and change history, "
+    "run_get(run <id>) for one run's tool calls, collection_list(<name>) reads a store's "
+    "entries, and find(query=<text>) searches them all by meaning — a collection, a stored "
+    "entry, or something said in the conversation."
 )
 
 _SCHEDULE_MECH = (
@@ -1200,8 +1146,10 @@ _SCHEDULE_MECH = (
     "- one-off — active · once, at Saturday, July 11, 2026 at 05:00 AM EDT, then it "
     "retires (rule: `DTSTART:20260711T090000Z FREQ=DAILY;COUNT=1`) · notify: off · "
     "one-shot · no runs yet\n"
-    "- twice-daily — active · every day at 08:00 AM and 08:00 PM "
-    "(rule: `FREQ=DAILY;BYHOUR=8,20`) · notify: off · no runs yet\n"
+    '  "1. check it."\n'
+    "- twice-daily — active · every day at 08:00 AM and 08:00 PM (rule: "
+    "`FREQ=DAILY;BYHOUR=8,20`) · notify: off · no runs yet\n"
+    '  "1. check the peak."\n'
     "\n"
     "### Recent activity\n"
     "(no recent activity)\n"
@@ -1210,20 +1158,15 @@ _SCHEDULE_MECH = (
     "- one-off (collection, 0 entries) — check it once, at nine\n"
     "- twice-daily (collection, 0 entries) — check the peak morning and evening\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "- name: Alex\n"
     "- timezone: America/Toronto\n"
     "- location: Toronto, Canada\n"
     "\n"
-    "To look deeper: memory_get(<name>) for a collection's full config and "
-    "change history, run_get(run <id>) for one run's tool calls, "
-    "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
-    "something said in the conversation."
+    "To look deeper: memory_get(<name>) for a collection's full config and change history, "
+    "run_get(run <id>) for one run's tool calls, collection_list(<name>) reads a store's "
+    "entries, and find(query=<text>) searches them all by meaning — a collection, a stored "
+    "entry, or something said in the conversation."
 )
 
 _EMPTY = (
@@ -1239,17 +1182,13 @@ _EMPTY = (
     "### Your memory\n"
     "(no stores yet)\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )
 
@@ -1260,6 +1199,7 @@ _OVERFLOW = (
     "notifications: on — proactive task notifications are delivered\n"
     "- watcher — active · every hour (rule: `FREQ=HOURLY`) · notify: off · last run WORKED "
     "2026-07-11 09:08 UTC\n"
+    '  "1. go"\n'
     "\n"
     "### Recent activity\n"
     "run run08 · 2026-07-11 09:08 UTC · watcher → WORKED (1 call)\n"
@@ -1275,18 +1215,13 @@ _OVERFLOW = (
     "### Your memory\n"
     "- watcher (collection, 0 entries) — a watcher\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
-    "To look deeper: memory_get(<name>) for a collection's full config and "
-    "change history, run_get(run <id>) for one run's tool calls, "
-    "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
-    "something said in the conversation."
+    "To look deeper: memory_get(<name>) for a collection's full config and change history, "
+    "run_get(run <id>) for one run's tool calls, collection_list(<name>) reads a store's "
+    "entries, and find(query=<text>) searches them all by meaning — a collection, a stored "
+    "entry, or something said in the conversation."
 )
 
 _ARCHIVED_HEAVY = (
@@ -1295,6 +1230,7 @@ _ARCHIVED_HEAVY = (
     "### Jobs\n"
     "notifications: on — proactive task notifications are delivered\n"
     "- live-watch — active · every hour (rule: `FREQ=HOURLY`) · notify: off · no runs yet\n"
+    '  "1. go"\n'
     "- retired-0 — archived 2026-07-11 08:00 UTC · no runs yet\n"
     "- retired-1 — archived 2026-07-11 08:01 UTC · no runs yet\n"
     "- retired-2 — archived 2026-07-11 08:02 UTC · no runs yet\n"
@@ -1306,49 +1242,48 @@ _ARCHIVED_HEAVY = (
     "- live-watch (collection, 0 entries) — still running\n"
     "archived: `retired-0`, `retired-1`, `retired-2`\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
-    "To look deeper: memory_get(<name>) for a collection's full config and "
-    "change history, run_get(run <id>) for one run's tool calls, "
-    "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
-    "something said in the conversation."
+    "To look deeper: memory_get(<name>) for a collection's full config and change history, "
+    "run_get(run <id>) for one run's tool calls, collection_list(<name>) reads a store's "
+    "entries, and find(query=<text>) searches them all by meaning — a collection, a stored "
+    "entry, or something said in the conversation."
 )
 
-_TAUGHT_SKILLS_ONLY = (
+
+_INSTRUCTION_SHAPES = (
     "## Penny's current state\n"
     "\n"
     "### Jobs\n"
     "notifications: on — proactive task notifications are delivered\n"
-    "(no jobs yet)\n"
+    "- feed-check — active · every hour (rule: `FREQ=HOURLY`) · notify: off · no runs yet\n"
+    '  reads https://harborferries.example/feed — "1. read '
+    'https://harborferries.example/feed each morning and write the headlines."\n'
+    "- harbour-watch — active · every hour (rule: `FREQ=HOURLY`) · notify: off · no runs "
+    "yet\n"
+    '  reads https://harborferries.example/seasonal-sailings — "1. read the harbour notice '
+    "board each morning before the first sailing. (2 more sentences cut — "
+    "memory_get('harbour-watch') shows the whole prompt)\"\n"
+    "- plain-note — active · every hour (rule: `FREQ=HOURLY`) · notify: off · no runs yet\n"
+    '  "1. count the boats in the harbour."\n'
     "\n"
     "### Recent activity\n"
     "(no recent activity)\n"
     "\n"
     "### Your memory\n"
-    "(no stores yet)\n"
-    "\n"
-    "### Known skills\n"
-    "Skills you've been taught — what each one does and what it needs from the user "
-    "to run. For one's full parameters and steps: skill_get('<name>').\n"
-    "- Track a shipment — track my package from acme and tell me when it moves "
-    "(parameters: tracking)\n"
-    "- Watch a page field — watch the price on a product page and ping me when it "
-    "drops (parameters: url)\n"
+    "- feed-check (collection, 0 entries) — check the feed\n"
+    "- harbour-watch (collection, 0 entries) — watch the harbour notices\n"
+    "- keepsakes (collection, 0 entries) — things worth keeping\n"
+    "- plain-note (collection, 0 entries) — count the boats\n"
     "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
-    "To look deeper: memory_get(<name>) for a collection's full config and "
-    "change history, run_get(run <id>) for one run's tool calls, "
-    "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
-    "something said in the conversation."
+    "To look deeper: memory_get(<name>) for a collection's full config and change history, "
+    "run_get(run <id>) for one run's tool calls, collection_list(<name>) reads a store's "
+    "entries, and find(query=<text>) searches them all by meaning — a collection, a stored "
+    "entry, or something said in the conversation."
 )
 
 
@@ -1371,17 +1306,13 @@ _RUN_OUTCOME_MATRIX = (
     "### Your memory\n"
     "(no stores yet)\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )
 
@@ -1407,17 +1338,13 @@ _RUN_WRITES = (
     "- news-digest (collection, 0 entries) — gather headlines\n"
     "- watchlist (collection, 2 entries) — pages watched\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )
 
@@ -1436,17 +1363,13 @@ _RUN_WRITES_MULTI_COLLECTION = (
     "- dislikes (collection, 1 entries) — things disliked\n"
     "- likes (collection, 1 entries) — things liked\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )
 
@@ -1463,17 +1386,13 @@ _EXCLUSION_RENDER = (
     "### Your memory\n"
     "(no stores yet)\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )
 
@@ -1505,17 +1424,13 @@ _MUTATION_CHANGED_FIELDS_MATRIX = (
     "### Your memory\n"
     "(no stores yet)\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )
 
@@ -1547,17 +1462,13 @@ _MUTATION_NOTE_MATRIX = (
     "### Your memory\n"
     "(no stores yet)\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )
 
@@ -1577,17 +1488,13 @@ _EMISSION_MATRIX = (
     "### Your memory\n"
     "(no stores yet)\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )
 
@@ -1611,16 +1518,12 @@ _MUTATION_BARE_MATRIX = (
     "### Your memory\n"
     "(no stores yet)\n"
     "\n"
-    "### Known skills\n"
-    "(no skills yet — when a task needs one, ask the user to walk you through it "
-    "once and you'll learn it automatically)\n"
-    "\n"
     "### About the user\n"
     "(no profile set yet)\n"
     "\n"
     "To look deeper: memory_get(<name>) for a collection's full config and "
     "change history, run_get(run <id>) for one run's tool calls, "
     "collection_list(<name>) reads a store's entries, and find(query=<text>) "
-    "searches them all by meaning — a collection, a skill, a stored entry, or "
+    "searches them all by meaning — a collection, a stored entry, or "
     "something said in the conversation."
 )

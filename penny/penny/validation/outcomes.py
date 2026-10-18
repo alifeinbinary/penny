@@ -110,19 +110,12 @@ class LoopContext(BaseModel):
     # Reasons already retried this model call — a validator keyed on one of these
     # must not ask to retry it again (the loop also enforces this).
     retried: set[ConditionKey] = Field(default_factory=set)
-    # The rendered frame of a skill this run just auto-extracted (#1658), stamped
-    # onto the text-branch ctx by ``ChatAgent._prepare_text_shape`` so the chat
-    # ``SkillNarrationValidator`` can narrate it (SAID==DID).  ``None`` when the run
-    # did not qualify for extraction, so every non-chat / non-qualifying run reads
-    # the same empty default.
-    #
-    # Its two former siblings — the applied-configuration frame (#1869) and the
-    # writes-landed frame (#1946/#2185) — are GONE (#2473): both records exist the
-    # moment their tool call lands, so ``ChatAgent.after_tool_step`` appends each
-    # straight onto that step's own tool result instead of stamping it here for a
-    # text-branch validator to redraw with.  Only the skill frame still waits for the
-    # text branch, because extraction is triggered by the text draft itself.
-    learned_skill_frame: str | None = None
+    # Neither a writes-landed frame nor a skill-narration frame is stamped here
+    # anymore (#2455 naive baseline / #2473): what a chat run wrote is delivered
+    # straight onto the tool result the moment its call lands (see
+    # ``ChatAgent.after_tool_step``), and there is no skill machinery left to
+    # narrate — so no run-shape validator needs a field on this ctx to redraw
+    # from.
 
 
 @runtime_checkable

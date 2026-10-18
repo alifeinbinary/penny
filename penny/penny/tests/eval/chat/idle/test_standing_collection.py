@@ -23,14 +23,11 @@ right for one is wrong for another, and each action is a case with its own sente
 ``standing-notify-on`` on the same job seeded quiet; each claims the switch the ask named,
 which its own seed holds the other way.  The OFF direction is where the wrong levers are — a
 measured sample asked to stop one watch's pings read the state as offering no granularity and
-retired the whole job, or reached for the global mute.  The ON direction is where the LANDING
-is in question: only it can be worded as starting something, which is the wording the two
-skill-gated doors out of idle are keyed to (#1927).
+retired the whole job, or reached for the global mute.
 
-**Every case claims the landing, and that is deliberate.**  Changing how a running job behaves
-is idle by the machine's own boundary (#1927) — the state definitions say so in as many words —
-so ``idle`` is the contract rather than a hope, and a sample that lands in ``request`` or
-``apply`` is the residual that ticket records, showing up as a number instead of as a note.
+**No claim reads where the machine landed, or a run's outcome (#2496, naive baseline).**  There
+is no conversation machine left to land on this branch, so every landing claim is dropped
+rather than ported — consistent with #2496's ruling on the naive branch generally.
 
 **What is NOT claimed, and why.**  That she called ``collection_configure`` is a ROUTE — many routes
 reach one end state, and a rule keyed to that name would simply not fire for a verb nobody
@@ -48,9 +45,9 @@ for again revives this row, so a retire that also rebound the routine or re-time
 hands back a different job under the same name.
 
 **A field the ledger keeps no prior for is read off the row.**  ``moved_this_run`` compares the
-priors the store records, and it records none for the values a routine is bound to or for a
-run quota.  So the end case, where a rule rewritten to carry its own end is a legitimate way to
-state one, reads the moments the rule fires at from now on.
+priors the store records, and it records none for a run quota.  So the end case, where a rule
+rewritten to carry its own end is a legitimate way to state one, reads the moments the rule
+fires at from now on.
 
 **No case claims what the turn did NOT do** (``docs/principles.md`` §4.3).  The world holds its
 jobs — one, or three where the ask is to list them — what each gathered and the global switch,
@@ -58,28 +55,26 @@ so those are what the cases claim still holds; whether a turn also stood somethi
 its own call, measured in the tool sequence.
 
 **The world is built the way production builds one (#1911/migration 0108: nothing is
-pre-seeded).**  Every collection here is one the user built: the container is created
-storage-only, then configured through the store's own metadata write with the program rendered
-through the production instantiation seam's three steps — the attachment bound to the
-container, the runtime join (#1907) writing each bound value into the leaf the demonstration
-put it in, then the render.  The routine itself goes into the registry through
-``chat_eval(seed_skills=…)``, embedded like a real one.  A hand-authored prose prompt would be
-a config defect the collector cannot read (#1916's strict dialect), so a world seeded that way
-would be claiming a job that could never run.
+pre-seeded; #2455 naive baseline: no skill or routine behind a job).**  Every collection here is
+one the user built: the container is created storage-only, then configured through the store's
+own metadata write with its plain-text prompt (``StandingJob.program``) naming the page it
+checks and what it looks for — the same free-text shape ``seed_known_routine`` writes into
+``extraction_prompt``.  A job seeded this way reads the production shape exactly, through
+``penny.tests.eval.end_to_end.world.seed_standing_jobs``.
 
 ``standing-describe-routine`` reads the same job back rather than operating it.  What it
-asserts is what the reply CITES from the job's record — the page its routine fetches — that
+asserts is what the reply CITES from the job's record — the page its program fetches — that
 every value the reply states traces to what the round was given, and the job still as it was;
 which read she reaches for, and how she words the walk-through, are measured.
 
-``standing-list-running`` reads THREE jobs back at once: the same routine pointed at three
+``standing-list-running`` reads THREE jobs back at once: the same kind of job pointed at three
 pages, each looking for its own kind of thing.  The reply carries one token per job — the
 thing that job looks for, which its page, its bound value and its description all spell and
 no other job's record does — and every job, everything each gathered and the global switch
 are as the turn found them.
 
 ``standing-ambiguous-job-match`` (#2365) is the one case here where the ask does NOT single a
-job out.  Two jobs of the SAME routine, each watching its own page for a price drop, stand
+job out.  Two jobs of the SAME kind, each watching its own page for a price drop, stand
 side by side; the ask names the kind of job ("the price watch") and nothing that tells the two
 apart.  Nothing in the registry resolves this — both rows match the description equally — so
 the ruled contract is that neither changes without the user saying which: the claims read that
@@ -98,37 +93,21 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import pytest
 
 from penny.agents.self_state import SelfStateHeader
-from penny.conversation_machine import ConversationState
 from penny.database import Database
-from penny.database.memory import EntryInput
-from penny.database.skills import (
-    DistillInput,
-    SkillDraft,
-    SkillStep,
-    bind_parameters,
-    derive_collection_name,
-    distill_steps,
-    render_skill,
-    retarget_writes,
-    slug_skill_name,
-)
 from penny.datetime_utils import zone_or_utc
 from penny.penny import Penny
-from penny.program import program_calls
-from penny.skill_extraction import _apply_leaf_labels, _interface_parameters
 from penny.tests.conftest import TEST_SENDER, require_memory
 from penny.tests.eval.conftest import (
     EVAL_MODELS,
     ChatEval,
     Preparer,
-    Seeder,
-    seeded_run_id,
 )
+from penny.tests.eval.end_to_end.world import StandingJob, seed_standing_jobs
 from penny.tests.eval.utils.assertions import Answer, Cohort
 from penny.tests.eval.utils.catalogue import Area
 from penny.tests.eval.utils.cohort import (
@@ -143,316 +122,33 @@ from penny.tests.eval.utils.cohort import (
 from penny.tests.eval.utils.fixtures import CannedPage
 from penny.tests.eval.utils.job_end import UNTIL_SUNDAY_NIGHT
 from penny.tests.eval.utils.worlds import World
-from penny.tools.collection_instantiation import next_occurrence, skill_params
-from penny.tools.micro_context import (
-    FramedParameter,
-    LeafLabel,
-    SkillLabels,
-    SkillSignature,
-)
+from penny.tools.collection_instantiation import next_occurrence
 
 pytestmark = pytest.mark.eval
 
 _OPERATIONS_FAMILY = "standing-collection-operations"
 _LEGIBILITY_FAMILY = "standing-collection-legibility"
 
-# The run that stood the jobs up — a seeded prior turn, so every reader of "what did the
-# model do this sample" excludes it (a job's own creation is history, not this turn's work).
-_STOOD_UP_RUN = seeded_run_id("stood-up-the-job")
 
-# The two calls the taught routine makes, in order.  Named once: the seeder holds the
-# rendered program against them in the STRICT dialect (#1916), so a fixture that stops
-# rendering a runnable program fails at the seed rather than as a puzzling miss.
-_BROWSE = "browse"
-_WRITE = "collection_write"
-_PROGRAM_TOOLS = (_BROWSE, _WRITE)
+# The standing job every case operates on: pointed at the page it was already watching,
+# running each morning and telling the user when it finds something.  Synthetic throughout
+# (the repo is public): an invented shop on an example domain, an invented thing to watch for.
+DEMONSTRATED_PAGE = "https://quillmarket.example.com/typewriters"
+DEMONSTRATED_WATCH = "portable typewriters"
+DEMONSTRATED_ENTRY = "Hermes Baby — 1958 portable, case included, $180."
 
-
-# ── The taught routine ────────────────────────────────────────────────────────
-
-
-class _Demonstration(NamedTuple):
-    """The round that taught the routine, as its ledger recorded it: the page it read,
-    what it was told to pull off it, the container it wrote into, and the entry that
-    landed.  Two steps — read the page, write what it said — the canonical taught round."""
-
-    url: str
-    extract: str
-    collection: str
-    entry_key: str
-    entry_value: str
-
-
-def _demonstrated_ledger(demonstration: _Demonstration) -> list[DistillInput]:
-    """The two certified steps distillation reads, with their results carrying the real
-    ``(<tool> result)`` frame — so the frame is stripped the way production strips it and
-    the write's content binds to the browse's PAYLOAD rather than to its narration."""
-    return [
-        DistillInput(
-            source_ordinal=1,
-            tool=_BROWSE,
-            arguments={"queries": [demonstration.url], "extract": demonstration.extract},
-            result=(f"You opened {demonstration.url} (browse result)\n{demonstration.entry_value}"),
-        ),
-        DistillInput(
-            source_ordinal=2,
-            tool=_WRITE,
-            arguments={
-                "collection": demonstration.collection,
-                "entries": [{"key": demonstration.entry_key, "content": demonstration.entry_value}],
-            },
-            result=(
-                f"You saved an entry to {demonstration.collection}: "
-                f"({_WRITE} result)\nWrote 1 entry."
-            ),
-        ),
-    ]
-
-
-def _leaf_at(arguments: dict[str, Any], path: list[str | int]) -> Any:
-    """The demonstrated value a substitution addresses — indexed directly, since a path a
-    step's own substitution carries either resolves or the step is corrupt."""
-    node: Any = arguments
-    for part in path:
-        node = node[part]
-    return node
-
-
-def _labels_by_value(steps: list[SkillStep], authored: dict[str, LeafLabel]) -> SkillLabels:
-    """The labeller's draw, authored against the demonstrated VALUES and mapped onto the
-    arg-derived spot names the distiller happened to mint.
-
-    Keyed by value because that is what the fixture MEANS — a naming change inside
-    distillation would otherwise leave this silently unmapped.  Every authored label must
-    map home: an accepted draw covers every spot (#1828), so a partly-labelled routine is
-    a shape run-end extraction cannot produce, and it fails here rather than seeding a
-    world nothing makes."""
-    labels: dict[str, LeafLabel] = {}
-    for step in steps:
-        for substitution in step.substitutions:
-            if substitution.parameter is None:
-                continue
-            value = str(_leaf_at(step.arguments, substitution.path))
-            if value in authored:
-                labels[substitution.parameter] = authored[value]
-    assert len(labels) == len(authored), (
-        f"every authored label must map home — matched {sorted(labels)} of {sorted(authored)}"
-    )
-    return SkillLabels(labels=labels)
-
-
-def _taught_routine(
-    demonstration: _Demonstration, signature: SkillSignature, authored: dict[str, LeafLabel]
-) -> SkillDraft:
-    """The skill a demonstrated round leaves in the registry, built by the production
-    pipeline over that round's ledger: ``distill_steps`` for the structure, the labeller's
-    draw applied by ``_apply_leaf_labels``, the framer's signature applied by
-    ``_interface_parameters``.
-
-    Only the two DRAWS are written by hand, which is what a fixture is for — so the
-    starting world is the shape extraction really produces (an all-placeholder recipe over
-    the SKILL-level parameters the framer minted, each carrying the value its round
-    demonstrated it with) rather than a convenient copy of it."""
-    steps, parameters = distill_steps(
-        _demonstrated_ledger(demonstration), frozenset({demonstration.collection})
-    )
-    steps, distilled = _apply_leaf_labels(steps, parameters, _labels_by_value(steps, authored))
-    return SkillDraft(
-        name=signature.name,
-        intent=signature.description,
-        description=signature.description,
-        steps=steps,
-        parameters=_interface_parameters(signature, distilled),
-        source_run_id=seeded_run_id("taught-the-routine"),
-    )
-
-
-# The one routine every case stands on, and the round that taught it.  Synthetic
-# throughout (the repo is public): an invented shop on an example domain, an invented
-# thing to watch for.
-_DEMONSTRATED_PAGE = "https://quillmarket.example.com/typewriters"
-_DEMONSTRATED_WATCH = "portable typewriters"
-_DEMONSTRATED_ENTRY = "Hermes Baby — 1958 portable, case included, $180."
-
-WATCH_ROUTINE = _taught_routine(
-    _Demonstration(
-        url=_DEMONSTRATED_PAGE,
-        extract=_DEMONSTRATED_WATCH,
-        collection="typewriter-finds",
-        entry_key="Hermes Baby",
-        entry_value=_DEMONSTRATED_ENTRY,
-    ),
-    SkillSignature(
-        name="track_new_listings",
-        description="Check a page for newly listed items of a given kind and keep what it finds.",
-        parameters=(
-            FramedParameter(
-                name="page",
-                description="the address of the page to check each run",
-                value=_DEMONSTRATED_PAGE,
-            ),
-            FramedParameter(
-                name="watched_for",
-                description="the kind of thing to look for on that page",
-                value=_DEMONSTRATED_WATCH,
-            ),
-        ),
-    ),
-    {
-        _DEMONSTRATED_PAGE: LeafLabel(
-            name="page", description="the address of the page to check each run"
-        ),
-        _DEMONSTRATED_WATCH: LeafLabel(
-            name="watched_for", description="the kind of thing to look for on that page"
-        ),
-        # The destination is a spot like any other, and additionally carries the attachment
-        # mark — applying the routine somewhere is what fills it (#1783/#1828).
-        "typewriter-finds": LeafLabel(
-            name="destination", description="the collection this is set up on"
-        ),
-        # The entry's key and content are deliberately NOT here: both came out of the
-        # browse, so distillation BINDS them to that step (#1659's structural provenance)
-        # and no spot is left for a label to name.  Listing one would be a fixture claiming
-        # a draw the labeller was never offered — which is what the map-home assertion in
-        # `_labels_by_value` catches.
-    },
-)
-
-
-# ── A standing job: the routine, applied ──────────────────────────────────────
-
-
-class StandingJob(NamedTuple):
-    """One collection as an apply turn leaves it: the routine it runs, the values it is
-    pointed at, and the TERMS the turn set (#1869).
-
-    ``holdings`` is what the job has already gathered — a standing job that has never run
-    is not the world these stories are about, and it is what the archive case reads to say
-    a retired job KEPT what it collected."""
-
-    routine: SkillDraft
-    values: dict[str, str]
-    description: str
-    schedule: str
-    notify: bool
-    holdings: tuple[tuple[str, str], ...] = ()
-
-    @property
-    def ordered_values(self) -> list[str]:
-        """The bound values in the routine's DECLARED order — what the container's name is
-        derived from, and not an order a fixture is free to choose."""
-        return [self.values[parameter.name] for parameter in self.routine.parameters]
-
-    @property
-    def container(self) -> str:
-        """The collection the job runs in, through the SHIPPED derivation — spelling the
-        name out would be a second copy of the scheme jobs are identified by."""
-        return derive_collection_name(slug_skill_name(self.routine.name), self.ordered_values)
-
-    @property
-    def program(self) -> str:
-        """The program the apply turn stores, through the production instantiation seam's
-        own three steps in its own order: the attachment bound to the container, the
-        runtime join (#1907) writing each bound value into the leaf the demonstration put
-        it in, then the render.
-
-        Composed here rather than called, because the shipped seam takes the registry ROW
-        and the runner lays the registry down after the seed runs — so what a fixture must
-        not do is invent a fourth step or reorder these three."""
-        attached = retarget_writes(self.routine.steps, self.container)
-        joined = bind_parameters(attached, self.routine.parameters, self.values)
-        return render_skill(joined, self.values)
-
-
-def seed_standing_jobs(*jobs: StandingJob) -> Seeder:
-    """Stand each job up the way the production path does: the container CREATED storage
-    only (the round's find-or-create), then configured — the rendered program, the RRULE
-    schedule, notify, and the routine plus its bound values stamped as provenance — then
-    whatever it has already gathered.
-
-    Both writes go through the real store methods, so the mutation ledger records them
-    citing the seeded run: a later "who changed this, and when" read finds a job with a
-    history rather than a row that appeared from nowhere."""
-
-    def seed(db: Database) -> None:
-        for job in jobs:
-            _stand_up(db, job)
-
-    return seed
-
-
-def _stand_up(db: Database, job: StandingJob) -> None:
-    # Laid down HERE rather than through ``seed_collection``, which is otherwise the one place a
-    # mechanism is seeded (#2129): that seam writes a container and its entries, and a standing
-    # JOB is the routine provenance beside them — the skill it runs and the values it is
-    # pointed at — with its program rendered through the instantiation seam's three steps.  A
-    # container seeded without those is not the thing these cases operate on.
-    #
-    # What it DOES take from that seam is the stamp, and that is load-bearing rather than tidy:
-    # the store records a collection's birth as a mutation event citing whatever run created it,
-    # and an unstamped one cites nothing — which every reader of "did THIS turn touch this row"
-    # then counts as this turn's work, because a seeded run is recognised by its id and a
-    # missing id is not one.
-    db.memories.create_collection(job.container, job.description, created_by_run_id=_STOOD_UP_RUN)
-    db.memories.update_collection_metadata(
-        job.container,
-        extraction_prompt=job.program,
-        schedule=job.schedule,
-        replace_schedule=True,
-        notify=job.notify,
-        skill_name=slug_skill_name(job.routine.name),
-        skill_params=job.values,
-        run_id=_STOOD_UP_RUN,
-    )
-    _assert_the_job_can_run(job)
-    if job.holdings:
-        require_memory(db, job.container).write(
-            [EntryInput(key=key, content=content) for key, content in job.holdings],
-            author="collector",
-            run_id=_STOOD_UP_RUN,
-        )
-
-
-def _assert_the_job_can_run(job: StandingJob) -> None:
-    """The stored program really is a program, and it is pointed at something.
-
-    Two ways a seeded job can be a job in name only, and both are silent: its steps stop
-    parsing in the STRICT rendered dialect (#1916), which leaves a cycle with a surface of
-    the terminator alone and a run record naming a config defect; or the RUNTIME JOIN
-    (#1907) stops filling its leaves, which leaves a program still describing what belongs
-    in each spot instead of naming the page it fetches.  Either way every case standing on
-    this world would be measuring nothing, so both fail here, out loud."""
-    program = job.program
-    parsed = tuple(call.tool for call in program_calls(program, frozenset(_PROGRAM_TOOLS)))
-    assert parsed == _PROGRAM_TOOLS, (
-        f"{job.container}: the stored program must parse as {_PROGRAM_TOOLS}, got {parsed}\n"
-        f"{program}"
-    )
-    unjoined = [value for value in job.values.values() if value not in program]
-    assert not unjoined, (
-        f"{job.container}: the runtime join must write every bound value into the program — "
-        f"{unjoined} missing from\n{program}"
-    )
-
-
-# The standing job every case operates on: the routine above, pointed at the page it was
-# taught on, running each morning and telling the user when it finds something.
 _FINDS = StandingJob(
-    routine=WATCH_ROUTINE,
-    values={"page": _DEMONSTRATED_PAGE, "watched_for": _DEMONSTRATED_WATCH},
+    container="typewriter-finds",
+    url=DEMONSTRATED_PAGE,
+    watched_for=DEMONSTRATED_WATCH,
     description="Portable typewriters newly listed at the Quill Market shop.",
     schedule="FREQ=DAILY;BYHOUR=7",
     notify=True,
     holdings=(
-        ("Hermes Baby", _DEMONSTRATED_ENTRY),
+        ("Hermes Baby", DEMONSTRATED_ENTRY),
         ("Olivetti Lettera 32", "Olivetti Lettera 32 — 1963 portable, case included, $220."),
     ),
 )
-
-# Held at IMPORT, not only at seed time: `make check` collects this module without running
-# a case, so a fixture that stopped rendering a runnable program is caught by the plain
-# suite instead of surviving until someone spends GPU on it.
-_assert_the_job_can_run(_FINDS)
 
 # What the job already holds before any turn runs — read ONCE off the fixture and asserted by
 # the premise probe, so a fixture edit cannot leave the kept-its-entries claim naming keys the
@@ -460,30 +156,31 @@ _assert_the_job_can_run(_FINDS)
 _HELD_KEYS = tuple(key for key, _ in _FINDS.holdings)
 
 # The same job with its own switch OFF — the entry condition of the case that asks for its
-# notifications back.  A job's container is named for its routine and the values it is bound
-# to, so this is the same row under the same name, differing in that one field.
+# notifications back.  A job's container is named explicitly (#2455 naive baseline: there is
+# no routine to derive one from), so this is the same row under the same name, differing in
+# that one field.
 _QUIET_FINDS = _FINDS._replace(notify=False)
 
-# Two more jobs of the same routine, for the case that asks what is running: each pointed at
+# Two more jobs of the same kind, for the case that asks what is running: each pointed at
 # its own page and looking for its own kind of thing, on its own cadence and switch.
 _KETTLES = StandingJob(
-    routine=WATCH_ROUTINE,
-    values={"page": "https://brasswick.example.com/kettles", "watched_for": "enamel kettles"},
+    container="kettle-finds",
+    url="https://brasswick.example.com/kettles",
+    watched_for="enamel kettles",
     description="Enamel kettles newly listed at the Brasswick shop.",
     schedule="FREQ=DAILY;BYHOUR=9",
     notify=True,
     holdings=(("Tidewater No. 4", "Tidewater No. 4 — two-quart enamel kettle, $48."),),
 )
 _ATLASES = StandingJob(
-    routine=WATCH_ROUTINE,
-    values={"page": "https://fernhollow.example.com/atlases", "watched_for": "pocket atlases"},
+    container="atlas-finds",
+    url="https://fernhollow.example.com/atlases",
+    watched_for="pocket atlases",
     description="Pocket atlases newly listed at the Fernhollow shop.",
     schedule="FREQ=HOURLY",
     notify=False,
     holdings=(("Marlowe 1931", "Marlowe 1931 — pocket atlas, cloth boards, $35."),),
 )
-for _job in (_KETTLES, _ATLASES):
-    _assert_the_job_can_run(_job)
 
 # How the user refers to it: their own words for the job, never its derived name.  The
 # derived name renders on the ambient mechanisms line, so resolving those words to that
@@ -674,16 +371,13 @@ def assert_the_operation_world(db: Database, case: _OperationCase) -> None:
 
 
 def _assert_the_job_is_as_seeded(db: Database, case_id: str, job: StandingJob) -> None:
-    """One job holds what its fixture says it gathered and is bound to the values its fixture
-    names — read off the store, which is what the claims read afterwards."""
+    """One job holds what its fixture says it gathered — read off the store, which is what
+    the claims read afterwards.  There is no routine binding left to check (#2455 naive
+    baseline): the job's whole identity is its own row, so what it holds is the whole
+    premise."""
     held = sorted(entry.key or "" for entry in require_memory(db, job.container).read_all())
     gathered = sorted(key for key, _ in job.holdings)
     assert held == gathered, f"{case_id}: {job.container} must hold {gathered}, it holds {held}"
-    row = db.memories.get(job.container)
-    bound = skill_params(row) if row is not None else {}
-    assert bound == job.values, (
-        f"{case_id}: {job.container} must be bound to {job.values}, it is bound to {bound}"
-    )
 
 
 def _premise(case: _OperationCase) -> Preparer:
@@ -722,15 +416,14 @@ def _mechanism_row(rendered: str, container: str) -> str | None:
 async def _drive(
     chat_eval: ChatEval, model: str, case: _OperationCase, family: str = _OPERATIONS_FAMILY
 ) -> Cohort:
-    """Drive one case on its standing jobs: each as its own apply turn left it, the routine
-    they run in the registry, and the premise re-asserted before the turn."""
+    """Drive one case on its standing jobs: each as its own apply turn left it, and the
+    premise re-asserted before the turn."""
     return await chat_eval(
         case_id=case.case_id,
         behaviour=case.behaviour,
         area=Area.STANDING_JOBS,
         model=model,
         seed=seed_standing_jobs(*case.jobs),
-        seed_skills=[WATCH_ROUTINE],
         prepare=_premise(case),
         world=case.ground,
         ask=case.ask,
@@ -946,9 +639,6 @@ async def test_turning_notifications_off_silences_only_that_job(
     lever than the ask named — retiring the whole job, or muting notifications globally — both
     of which look like success from inside the turn and neither of which is what was asked."""
     cohort = await _drive(chat_eval, model, _NOTIFY_OFF)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — the field the ask named moved, and nothing else did.
     cohort.claim(
         "state: the job's notifications are off",
@@ -1006,9 +696,6 @@ async def test_turning_notifications_back_on_wakes_only_that_job(
     alone fails the headline whatever its reply said.  The global switch is a separate lever
     one row up, already on in this world: it is claimed as what the turn found and left."""
     cohort = await _drive(chat_eval, model, _NOTIFY_ON)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — the field the ask named moved, and nothing else did.
     cohort.claim(
         "state: the job's notifications are on",
@@ -1071,9 +758,6 @@ async def test_retiring_a_job_archives_it_and_keeps_what_it_gathered(
     cadence or flipped the switch hands back a different job under the same name, which is why
     the drift claim below reads the whole row rather than the archive flag alone."""
     cohort = await _drive(chat_eval, model, _ARCHIVE)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE
     cohort.claim(
         "state: the job is retired (archived)",
@@ -1164,9 +848,6 @@ async def test_re_timing_a_job_states_no_hour_it_never_ran_at(
     the record frame asks for and this case deliberately does not demand — the harm is a
     stated prior that is false, not a confirmation that stays quiet about it."""
     cohort = await _drive(chat_eval, model, _RE_TIME)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE
     cohort.claim(
         "state: the job now runs at the hour they asked for",
@@ -1309,9 +990,6 @@ async def test_giving_a_job_an_end_stops_it_when_the_ask_said(
     headline.  What the end claim reads is when the job stops, never which field holds it; the
     cadence claim beside it is what keeps "restated the rule" from being a way to re-time it."""
     cohort = await _drive(chat_eval, model, _END_CHANGED)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — the end the ask named, and the rest of the job as it was.
     cohort.assert_the_job_ends_when_asked(_FINDS.container, _ASKED_END)
     cohort.claim(_STILL_LIVE, _the_job_is_still_live(_FINDS.container), SpecCategory.STORE)
@@ -1354,7 +1032,7 @@ _DESCRIBE = _OperationCase(
     case_id="standing-describe-routine",
     behaviour=(
         "In the chat agent, when the user asks what a standing job does, Penny describes the "
-        "routine from its record, and every value in her reply traces to that record."
+        "job from its record, and every value in her reply traces to that record."
     ),
     job=_FINDS,
     renders=SelfStateHeader.MECHANISM_NOTIFIES,
@@ -1389,9 +1067,6 @@ async def test_she_describes_the_routine_the_job_runs(chat_eval: ChatEval, model
     pattern the reply must match (``docs/principles.md`` §4.7).  An invented step that names a
     specific — another site, an hour the job does not run at — is what the sourcing claim reads."""
     cohort = await _drive(chat_eval, model, _DESCRIBE, family=_LEGIBILITY_FAMILY)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — the page the record carries, stated; and the job, as the turn found it.
     cohort.assert_the_reply_answers_the_ask()
     cohort.claim(
@@ -1451,7 +1126,7 @@ for _job, _token in _LISTED:
     _record = f"{_job.program} {_job.description} {_job.container} {_job.holdings}".casefold()
     assert all(
         _token in text.casefold()
-        for text in (*_job.values.values(), _job.description, _job.container)
+        for text in (_job.url, _job.watched_for, _job.description, _job.container)
     ), f"{_token!r} must be on every part of its own job's record"
     for _other, _other_token in _LISTED:
         assert _other is _job or _other_token not in _record, (
@@ -1488,9 +1163,6 @@ async def test_she_lists_every_job_she_is_running(chat_eval: ChatEval, model: st
     cadence, a switch, a page — since the ask names none of them; a specific the reply does
     state and the record does not is what the sourcing claim reads."""
     cohort = await _drive(chat_eval, model, _LIST_RUNNING, family=_LEGIBILITY_FAMILY)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — each job named in the reply; and every job, what each gathered and the global
     # switch, as the turn found them.
     cohort.assert_the_reply_answers_the_ask()
@@ -1509,7 +1181,7 @@ async def test_she_lists_every_job_she_is_running(chat_eval: ChatEval, model: st
 
 # ═══ an ask that matches two of the same kind ════════════════════════════════
 #
-# Two jobs of the SAME routine, each watching its own page for a price drop — the #2365
+# Two jobs of the SAME kind, each watching its own page for a price drop — the #2365
 # shape: "turn off notifications for the price watch" when two price watches are running,
 # and the ask names only the KIND, never which one.  Nothing else in the conversation picks
 # between them either, so the entry condition is genuinely ambiguous rather than ambiguous
@@ -1524,29 +1196,23 @@ async def test_she_lists_every_job_she_is_running(chat_eval: ChatEval, model: st
 # spread (#2373's "facts asserted, behaviour measured" rule).
 
 _PRICE_WATCH_A = StandingJob(
-    routine=WATCH_ROUTINE,
-    values={
-        "page": "https://foxden.example.com/camera-kit",
-        "watched_for": "price drops on the camera kit",
-    },
+    container="camera-kit-price-watch",
+    url="https://foxden.example.com/camera-kit",
+    watched_for="price drops on the camera kit",
     description="Price drops on the camera kit at Foxden.",
     schedule="FREQ=DAILY;BYHOUR=8",
     notify=True,
     holdings=(("Foxden camera kit", "Foxden camera kit — now $340, down from $380."),),
 )
 _PRICE_WATCH_B = StandingJob(
-    routine=WATCH_ROUTINE,
-    values={
-        "page": "https://cedarlane.example.com/turntable",
-        "watched_for": "price drops on the turntable",
-    },
+    container="turntable-price-watch",
+    url="https://cedarlane.example.com/turntable",
+    watched_for="price drops on the turntable",
     description="Price drops on the turntable at Cedarlane.",
     schedule="FREQ=DAILY;BYHOUR=18",
     notify=True,
     holdings=(("Cedarlane turntable", "Cedarlane turntable — now $210, down from $250."),),
 )
-for _job in (_PRICE_WATCH_A, _PRICE_WATCH_B):
-    _assert_the_job_can_run(_job)
 
 # The two tokens the reply has to carry to have named BOTH jobs — each on its own job's
 # values and description, on neither other job's, and in NEITHER wording: the ask names only
@@ -1558,15 +1224,14 @@ _AMBIGUOUS_MATCH_TOKENS = (
 )
 
 for _job, _token in _AMBIGUOUS_MATCH_TOKENS:
-    assert _token in f"{' '.join(_job.values.values())} {_job.description}".casefold(), (
+    assert _token in f"{_job.url} {_job.watched_for} {_job.description}".casefold(), (
         f"{_token!r} must be on {_job.container}'s own record"
     )
 for _other, _other_token in _AMBIGUOUS_MATCH_TOKENS:
     for _job, _token in _AMBIGUOUS_MATCH_TOKENS:
         if _other is not _job:
             assert (
-                _other_token
-                not in f"{' '.join(_job.values.values())} {_job.description}".casefold()
+                _other_token not in f"{_job.url} {_job.watched_for} {_job.description}".casefold()
             ), f"{_other_token!r} must not be on {_job.container}'s record"
 
 _AMBIGUOUS_MATCH = _OperationCase(
@@ -1618,9 +1283,6 @@ async def test_an_ask_matching_two_jobs_of_the_same_kind_changes_neither(
     close enough to one of the two rows and flips its switch alone, which looks like success
     from inside the turn and leaves the user's actual job untouched and unmentioned."""
     cohort = await _drive(chat_eval, model, _AMBIGUOUS_MATCH)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — neither row moved, at all; the reply names both.
     cohort.claim(
         "state: the camera-kit price watch is unchanged",

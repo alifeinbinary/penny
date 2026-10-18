@@ -39,7 +39,6 @@ import re
 import string
 import unicodedata
 import urllib.parse
-from abc import ABC, abstractmethod
 from typing import NamedTuple
 
 from penny.llm.models import LlmResponse
@@ -48,7 +47,6 @@ from penny.text_validity import strip_think_tags
 from penny.validation.conditions import ConditionKey
 from penny.validation.outcomes import (
     LoopContext,
-    NudgeContinue,
     Proceed,
     Repair,
     Retry,
@@ -313,58 +311,13 @@ class HallucinatedToolCallRepair:
 
 
 # ── Chat-only run-shape validators ───────────────────────────────────────────
-
-
-class _RecordNarrationValidator(ABC):
-    """The shared shape of a narrate-from-the-RECORD guard: a chat run that changed
-    something durable tells the user about it from what the framework stamped, never from
-    memory (SAID==DID).
-
-    The framework does the work deterministically at the text-branch prep
-    (``ChatAgent._prepare_text_shape``) and stamps a rendered frame on the ctx; a
-    subclass names which frame it reads.  The model re-replies against the render via a
-    ``NudgeContinue`` — a validator in the chat chain, not a branch in the loop.
-
-    This used to have two siblings — the applied-configuration frame (#1869) and the
-    writes-landed frame (#1946/#2185) — both retired by #2473: each record exists the
-    moment its tool call lands, so ``ChatAgent.after_tool_step`` now appends it straight
-    onto that step's own tool result instead of waiting for the text branch and
-    discarding whatever got drafted in between.  ``SkillNarrationValidator`` below is the
-    one record still narrated here, because skill extraction is triggered by the text
-    draft itself — there is no earlier moment to hand its frame over.
-
-    On the final step there is no room to continue (tools stripped, the loop would
-    exhaust), so it Proceeds — what happened has already happened durably, and it surfaces
-    ambiently in the next turn's self-state header."""
-
-    def check(self, response: LlmResponse, ctx: LoopContext) -> ValidationOutcome:
-        if ctx.is_final_step or response.has_tool_calls:
-            return Proceed(response=response)
-        frame = self._frame(ctx)
-        if frame:
-            logger.info("Narrating %s this turn", self._narrating())
-            return NudgeContinue(message=frame)
-        return Proceed(response=response)
-
-    @abstractmethod
-    def _frame(self, ctx: LoopContext) -> str | None:
-        """The rendered record this guard narrates, or ``None`` when there is none."""
-
-    @abstractmethod
-    def _narrating(self) -> str:
-        """What the log line says this run is narrating."""
-
-
-class SkillNarrationValidator(_RecordNarrationValidator):
-    """A chat run that just AUTO-EXTRACTED a skill narrates it in the same turn
-    (#1658, SAID==DID) — from the render (its name, what it's for, what it needs)
-    rather than from memory."""
-
-    def _frame(self, ctx: LoopContext) -> str | None:
-        return ctx.learned_skill_frame
-
-    def _narrating(self) -> str:
-        return "an auto-extracted skill"
+#
+# The narrate-from-the-record guard that used to live here (`_RecordNarrationValidator`
+# and its two subclasses, `WritesLandedValidator` / `SkillNarrationValidator`) is gone
+# (#2455 naive baseline / #2473): what a chat run wrote is now delivered straight onto
+# the tool result the moment its call lands (see `ChatAgent.after_tool_step`), and
+# there is no skill machinery left to narrate — so `ChatAgent.run_shape_validators` is
+# empty and nothing here needs a text-branch guard.
 
 
 # ── Collector-only run-shape validator ───────────────────────────────────────

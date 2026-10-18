@@ -23,7 +23,6 @@ from collections.abc import Callable
 
 import pytest
 
-from penny.conversation_machine import ConversationState
 from penny.penny import Penny
 from penny.tests.eval.conftest import EVAL_MODELS, ChatEval
 from penny.tests.eval.utils.assertions import Answer
@@ -40,7 +39,6 @@ from penny.tests.eval.utils.cohort import (
 from penny.tests.eval.utils.lookup_world import (
     FAMILY,
     HARBOUR_PAGE_WORD,
-    HARBOUR_ROUTINE,
     HARBOUR_WATCH_WORD,
     LATEST_FIND_WORD,
     LIME_WORDS,
@@ -52,6 +50,7 @@ from penny.tests.eval.utils.lookup_world import (
     SISTER_MENTION,
     SISTER_REPLY,
     TYPEWRITER_WATCH,
+    _seed_harbour_job,
     archive_after_seeding,
     assert_seeded_turns_embedded,
     seed_job_with_run_history,
@@ -94,14 +93,13 @@ def _the_list_is_archived(collection: str) -> Callable[[SampleObservation, World
 
 # ═══ 1 · a routine's steps, when it is not running as a job ═════════════════
 #
-# The taught routine is built through the SAME production pipeline WATCH_ROUTINE is
-# (distillation over a fabricated demonstration, the run-end labeller, the framer's
-# signature) and is never applied to any collection — a bare registry row.  Every
-# leaf of a distilled routine is a binding or a parameter, so the literal page and
-# watch phrase never render for an unattached skill; the two anchors live in the
-# labelled descriptions, which the routine's recipe carries wherever a tool returns
-# it — and which the ambient "needs:" line carries too, so a reply written from the
-# header alone holds both.
+# #2519's naive baseline: there is no skill registry left to hold a routine unattached
+# from any job, so "a routine's steps" is read off the running OR ARCHIVED job's own
+# prompt instead.  Seeded as a job Penny already knows (``seed_known_routine`` — the
+# job itself, plus the earlier conversation that set it up, in her own logs), then
+# archived — which is what keeps "not running as any job" literally true.  The two
+# anchors live in the job's own plain-text prompt (``f"Check {url} for {extract} and
+# save it."``), which a ``find``/``memory_get`` read carries wherever it renders.
 
 _HARBOUR_ASK = "remind me how you check the harbour flag"
 _HARBOUR_PHRASINGS = (
@@ -132,7 +130,7 @@ async def test_a_routine_not_running_is_recited(chat_eval: ChatEval, model: str)
         ),
         area=Area.MEMORY,
         model=model,
-        seed_skills=[HARBOUR_ROUTINE],
+        seed=_seed_harbour_job,
         world=_HARBOUR_WORLD,
         ask=_HARBOUR_ASK,
         also_phrased=_HARBOUR_PHRASINGS,
@@ -141,10 +139,8 @@ async def test_a_routine_not_running_is_recited(chat_eval: ChatEval, model: str)
         family=FAMILY,
         timeout=240.0,
     )
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-    # STORE — empty, and that is a report: the ask reads a routine, writes nothing,
-    # and the registry holds exactly the one skill this world seeded either way.
+    # STORE — empty, and that is a report: the ask reads the job's own record, writes
+    # nothing, and the registry holds exactly the one job this world seeded either way.
     # PROVENANCE
     cohort.assert_every_value_in_the_reply_is_sourced()
     cohort.assert_the_reply_answers_the_ask()
@@ -203,8 +199,6 @@ async def test_an_old_mention_comes_back_out_of_what_was_said(
         family=FAMILY,
         timeout=240.0,
     )
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
     # STORE — empty, and that is a report: the ask keeps nothing and the fact lives
     # only in the conversation.
     # PROVENANCE
@@ -254,8 +248,6 @@ async def test_every_list_is_named_among_thirty(chat_eval: ChatEval, model: str)
         family=FAMILY,
         timeout=240.0,
     )
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
     # STORE
     cohort.assert_the_running_mechanisms_survive()
     # PROVENANCE
@@ -309,8 +301,6 @@ async def test_an_archived_list_is_reached_and_read(chat_eval: ChatEval, model: 
         family=FAMILY,
         timeout=240.0,
     )
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
     # STORE — the list stays archived, with everything it held.
     cohort.claim(
         "state: the list is still archived",
@@ -374,8 +364,6 @@ async def test_a_long_list_is_searched_not_skimmed(chat_eval: ChatEval, model: s
         family=FAMILY,
         timeout=240.0,
     )
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
     # STORE — a read-only ask: the list is exactly as it was.
     cohort.assert_what_the_store_held_survives()
     # PROVENANCE
@@ -432,8 +420,6 @@ async def test_a_running_jobs_last_finding_and_check_are_read(
         family=FAMILY,
         timeout=240.0,
     )
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
     # STORE — the job is still running, as it was, holding both finds.
     cohort.assert_the_running_mechanisms_survive()
     for word in (LATEST_FIND_WORD, "ribbon"):

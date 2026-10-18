@@ -14,45 +14,21 @@ from penny.agents.base import Agent, InvalidDraw, ProgressCallback
 from penny.agents.models import ControllerResponse, ToolCallRecord
 from penny.agents.self_state import SelfStateHeader
 from penny.channels.base import PageContext
-from penny.constants import ChatPromptType, MutationEntityType, PennyConstants, RunOutcome
-from penny.conversation_machine import (
-    ConversationState,
-    RoundFraming,
-    RoundShortfall,
-    conversation_prompt,
-)
-from penny.datetime_utils import current_datetime_line, user_timezone_name
+from penny.constants import ChatPromptType, PennyConstants, RunOutcome
+from penny.datetime_utils import current_datetime_line
 from penny.llm.call_link import CallLink
 from penny.llm.models import LlmError
 from penny.prompts import Prompt
-from penny.responses import PennyResponse
-from penny.round_framing import discard_round_container
-from penny.skill_extraction import (
-    NoExtraction,
-    SkillExtracted,
-    SkillExtractionResult,
-    SkillExtractor,
-)
 from penny.text_validity import is_call_as_text_bail, is_call_fragment_reply, is_empty_draw
 from penny.tools import Tool
 from penny.tools.browse import BrowseTool
-from penny.tools.collection_instantiation import render_applied_configuration
 from penny.tools.generate_image import GenerateImageTool
-from penny.tools.memory_tools import (
-    CollectionSetTool,
-    collector_tool_surface,
-    render_nothing_landed,
-    render_writes_landed,
-)
+from penny.tools.memory_tools import render_nothing_landed, render_writes_landed
 from penny.tools.notifications import NotificationsMuteTool, NotificationsUnmuteTool
-from penny.tools.skill_tools import render_skill_brief, render_skill_shape
 from penny.validation import ConditionKey
-from penny.validation.outcomes import LoopContext
-from penny.validation.response_validators import SkillNarrationValidator
 
 if TYPE_CHECKING:
     from penny.llm.image_client import OllamaImageClient
-    from penny.llm.models import LlmResponse
 
 logger = logging.getLogger(__name__)
 
@@ -78,19 +54,13 @@ class ChatAgent(Agent):
 
     name: str = "chat"
     system_prompt = Prompt.CONVERSATION_PROMPT
-    # Chat's run-shape chain (base Agent's is empty).  A new chat shape guard is one
-    # more entry here — never a branch in the loop.
-    #  - SkillNarrationValidator: on a run that just auto-extracted a skill (#1658),
-    #    nudge the model to tell the user what it learned FROM the rendered frame the
-    #    text-branch prep stamped on the ctx (SAID==DID).
-    #
-    # Its two former siblings — the applied-configuration frame (#1869) and the
-    # writes-landed frame (#1946/#2185) — retired with #2473: both records exist the
-    # moment their tool call lands, so ``after_tool_step`` (below) appends each straight
-    # onto that step's own tool result rather than waiting for a text draw to discard.
-    run_shape_validators = [
-        SkillNarrationValidator(),
-    ]
+    # Chat's run-shape chain (base Agent's is empty).  Empty here too (#2455 naive
+    # baseline / #2473): what a run wrote and what it configured are both delivered
+    # earlier, straight onto the tool result the moment their call lands (see
+    # ``after_tool_step`` below), so there is nothing left for a text-branch
+    # validator to narrate.  A new chat shape guard is one more entry here — never a
+    # branch in the loop.
+    run_shape_validators = []
 
     # Chat's invalid draws are the ones that are not a REPLY (#1839/#1937): a plain
     # conversational reply IS chat's valid terminal state, so nothing about ordinary
@@ -146,43 +116,10 @@ class ChatAgent(Agent):
         # tools fresh per turn (read_emails summarises against the current
         # message + date), so it takes ``(user_query, today)``.
         self._email_tools_builder = email_tools_builder
-        # Automatic skill extraction at run end (#1658): the chat run's own ledger is
-        # distilled into a skill when the machine says the turn was a LEARN turn
-        # (#1850).  There is no ``skill_create`` tool — the framework does this
-        # deterministically.
-        self._skill_extractor = SkillExtractor(
-            self.db,
-            self._embedding_model_client,
-            self._model_client,
-            agent_name=self.name,
-            # The collector-runnable tool surface (#1668) — single-sourced, so a
-            # captured step a collector could never run (a lifecycle call the demo
-            # made) is dropped from the recipe instead of baked into an
-            # uninstantiable skill.
-            collector_tool_surface=collector_tool_surface(self.db, self._model_client),
-        )
-        # The run whose extraction was already attempted this turn — the structural
-        # once-per-run guard, so the post-narration re-reply never re-extracts or
-        # re-reads the store (chat turns are sequential, so one field suffices; no leak).
+        # The run whose writes-landed record was already computed this turn — the
+        # structural once-per-run guard, so the post-narration re-reply never re-reads
+        # the store a second time (chat turns are sequential, so one field suffices).
         self._extraction_run_id: str | None = None
-        # What that attempt RETURNED, held for the span of the turn so the run-end
-        # learn check reads a recorded outcome rather than re-deciding it (#1839).
-        # ``None`` means extraction never ran (no text branch was reached).
-        self._extraction_result: SkillExtractionResult | None = None
-        # The state the machine decided for the turn now running — set from ``handle``'s
-        # parameter and cleared when the turn ends.  It is held for exactly as long as
-        # ``_current_message`` and for the same reason: the agent loop's text branch is
-        # several frames below ``handle`` and carries no state of its own, and both the
-        # extraction gate (#1850) and the narration that follows it happen down there.
-        # Nothing READS the machine here — the value is the channel's decision passed
-        # down and passed on.
-        self._turn_state: ConversationState | None = None
-        # The round's framing (#1868), threaded and held exactly like the state above and
-        # for the same reason: the run-end extraction that reuses it happens several frames
-        # below ``handle``.  It is what the turn's own instruction named — the routine and
-        # the container — so reading it here rather than re-deciding is what keeps the
-        # skill filed under the name the turn ran under.
-        self._turn_framing: RoundFraming | None = None
 
     def get_tools(self, run_id: str | None = None) -> list[Tool]:
         tools = super().get_tools(run_id)
@@ -198,22 +135,6 @@ class ChatAgent(Agent):
         tools.extend(self._email_tools())
         tools.extend(self._plugin_tools)
         return tools
-
-    def _configuring_round(self) -> RoundFraming | None:
-        """The round this turn is CONFIGURING (#1869) — the framing on an APPLY turn.
-
-        Keyed to the state for the same reason the prompt's own round line is: apply is
-        the state that stands the routine up, so it is the state whose ``collection_configure``
-        carries only the terms.  The framing is carried past learn (a learn turn holds one
-        too), and a learn turn that configured anything would be a learn turn doing the
-        next turn's job — so what it holds is not what this hook is about.
-
-        The value is the turn's own parameters, held for the span of the turn exactly as
-        ``_current_message`` is (both are the channel's decisions passed down, and both
-        are read by machinery several frames below ``handle``)."""
-        if self._turn_state is not ConversationState.APPLY:
-            return None
-        return self._turn_framing
 
     def _email_tools(self) -> list[Tool]:
         """Config-gated email tools, built fresh for this turn.
@@ -235,37 +156,7 @@ class ChatAgent(Agent):
             self._current_message or "", current_datetime_line(self.db)
         )
 
-    # ── Automatic skill extraction + narration (#1658) ──────────────────
-
-    async def _prepare_text_shape(
-        self, response: LlmResponse, ctx: LoopContext, run_id: str, call_link: CallLink
-    ) -> LoopContext:
-        """When the chat run emits its first final text, run automatic skill extraction
-        over this run's completed ledger (#1658) and hand the rendered frame to the chat
-        chain's ``SkillNarrationValidator``.
-
-        Extraction runs exactly ONCE per run (``_extraction_run_id``): it is real work
-        over the store that must not be repeated, and re-reading it after the narration
-        would answer the same question a second time.  ``None`` on every later text draw
-        of the same run — the frame is narrated once, the chain nudges, and the draw
-        after it finds nothing left and becomes the real final answer.
-
-        This is the only record still narrated at the text branch.  Its former
-        siblings — what the run CONFIGURED (#1869) and what it WROTE (#1946/#2185) —
-        are delivered earlier, by ``after_tool_step`` (below), the moment their own tool
-        call lands (#2473): extraction has no such earlier moment, since what triggers
-        it IS the text draft."""
-        if run_id == self._extraction_run_id:
-            return ctx
-        self._extraction_run_id = run_id
-        frame = await self._extract_and_frame_skill(
-            run_id, call_link, self._turn_state, self._turn_framing
-        )
-        if frame is None:
-            return ctx
-        return ctx.model_copy(update={"learned_skill_frame": frame})
-
-    # ── Writes + configuration records, delivered with the tool step (#2473) ──
+    # ── Writes-landed narration, delivered with the tool step (#2473) ─────
 
     async def after_tool_step(
         self,
@@ -274,10 +165,12 @@ class ChatAgent(Agent):
         messages: list[dict],
         run_id: str,
     ) -> None:
-        """Append what this run has CONFIGURED and WRITTEN so far to the end of the
-        step's own tool result — before any draft of the reply exists.
+        """Append what this run has WRITTEN so far to the end of the step's own tool
+        result — before any draft of the reply exists (#2455 naive baseline drops this
+        chain's other former member, the applied-configuration frame, #1869 — it reads
+        the round framing this branch no longer has).
 
-        Both records exist the moment their tool call lands (they are reads of the
+        The record exists the moment its tool call lands (it is a read of the
         store, not of the run's own memory of itself), so recomputing them and
         appending whichever are non-``None`` here means the model's first reply is
         drawn with them already in view.  There is no draft to discard and no second
@@ -285,10 +178,10 @@ class ChatAgent(Agent):
         with it spliced into the system prompt, which is the two-reply regression this
         ticket closes (#2473).
 
-        Recomputed only on a step whose OWN calls could plausibly have changed one of
-        the two (a ``collection_configure`` or a store-asking write) — ``_may_change_a_
-        record`` gates it on ``step_records`` alone, so a step that only read or
-        browsed costs no extra ledger query; neither record can change from a read.
+        Recomputed only on a step whose OWN calls could plausibly have changed the
+        record (a store-asking write) — ``_may_change_a_record`` gates it on
+        ``step_records`` alone, so a step that only read or browsed costs no extra
+        ledger query: the record can't change from a read.
 
         Appended to the TOOL result, never edited into the system prompt: the system
         prompt is this run's prefix, and editing it mid-run would invalidate a local
@@ -297,28 +190,17 @@ class ChatAgent(Agent):
         never leaves an earlier message understating what has landed."""
         if not self._may_change_a_record(step_records):
             return
-        addendum = "\n\n".join(
-            frame
-            for frame in (
-                self._applied_configuration_frame(records, run_id),
-                self._writes_landed_frame(records, run_id),
-            )
-            if frame is not None
-        )
+        addendum = self._writes_landed_frame(records, run_id)
         if addendum:
             self._append_to_last_tool_result(messages, addendum)
 
     @staticmethod
     def _may_change_a_record(step_records: list[ToolCallRecord]) -> bool:
-        """Whether this step's OWN calls could have moved the configuration or the
-        writes record — the same two tool marks those records are read off
-        (``CollectionSetTool.name`` / ``Tool.asks_to_store``), so a step that only read
-        or browsed is never worth a ledger query: neither record can change from a
-        read."""
-        return any(
-            record.tool == CollectionSetTool.name or Tool.asks_to_store(record.tool)
-            for record in step_records
-        )
+        """Whether this step's OWN calls could have moved the writes record — the
+        same tool mark the record is read off (``Tool.asks_to_store``), so a step
+        that only read or browsed is never worth a ledger query: the record can't
+        change from a read."""
+        return any(Tool.asks_to_store(record.tool) for record in step_records)
 
     @staticmethod
     def _append_to_last_tool_result(messages: list[dict], addendum: str) -> None:
@@ -355,99 +237,6 @@ class ChatAgent(Agent):
         read off each call's own tool's declared mark, never off its name."""
         return [record for record in records if Tool.asks_to_store(record.tool)]
 
-    def _applied_configuration_frame(
-        self, records: list[ToolCallRecord], run_id: str
-    ) -> str | None:
-        """The record of what this turn CONFIGURED, rendered for the narration frame
-        (#1869) — ``None`` when the turn configured nothing.
-
-        Two things have to be true, and both are READS rather than judgments: the turn was
-        standing this round's routine up, and a ``collection_configure`` call actually landed
-        this run.  The record itself is the container's own row, which is where the
-        routine, its bound values and the job's terms were written — so a turn that
-        supplied only the terms narrates the whole configuration from the store rather
-        than from arguments the framework filled in on its behalf.
-
-        A container with no routine on it renders nothing: an inert collection has no
-        configuration to state, and claiming one would be the honest-failure rule broken
-        from the other side.
-
-        The record also carries what this run CHANGED (#1946) — the priors the mutation
-        ledger recorded for this very run, so a line the turn moved renders
-        ``was <old> → now <new>``.  The row alone cannot answer that: the edit overwrote
-        the old value, so a turn asked to FIX a running job had nowhere to read the state
-        it was fixing and reported it from memory."""
-        framing = self._configuring_round()
-        if framing is None or not self._set_a_collection(records):
-            return None
-        row = self.db.memories.get(framing.container)
-        if row is None:
-            return None
-        priors = self.db.mutations.priors_for_run(
-            framing.container, run_id, entity_type=MutationEntityType.COLLECTION
-        )
-        configuration = render_applied_configuration(row, priors, user_timezone_name(self.db))
-        if configuration is None:
-            return None
-        return Prompt.CONFIGURATION_APPLIED_NARRATION.format(configuration=configuration)
-
-    @staticmethod
-    def _set_a_collection(records: list[ToolCallRecord]) -> bool:
-        """Whether a ``collection_configure`` call succeeded this run — the structural "did this
-        turn configure anything" read, off the run's own call records rather than off the
-        durable row (which would also read TRUE for a job configured on some earlier
-        turn)."""
-        return any(
-            record.tool == CollectionSetTool.name and not record.failed for record in records
-        )
-
-    async def _extract_and_frame_skill(
-        self,
-        run_id: str,
-        call_link: CallLink,
-        state: ConversationState | None,
-        framing: RoundFraming | None,
-    ) -> str | None:
-        """Extract a skill from this run and, on success, build the narration frame
-        so the model narrates from the render, not from memory.  Two renders of the
-        same record, both in prose and neither shaped like a tool call for the reply
-        to read aloud (#1799): the BRIEF one (#1804) — what the routine is and what it
-        needs — and its SHAPE (#1943) — what it runs, in order — which is what makes a
-        step the demonstration picked up by accident visible to the one person who
-        knows it does not belong.  ``None`` when the run did not qualify — the gate is
-        logged, never silently swallowed.
-
-        ``state`` is the turn's landed machine state, handed to the extractor as a
-        parameter (#1850): learning is the one thing that mints a routine, so what a
-        run yields is decided by what the turn WAS, not by the shape of what it did.
-
-        The typed outcome is also RECORDED on ``_extraction_result``: a learn turn's
-        one valid terminal state is a skill in the registry, and the run-end check
-        that enforces it (#1839) reads what this attempt returned rather than
-        re-deriving it.
-
-        ``framing`` is the round's entry framing (#1868), handed on the same way: the
-        interface was settled before the round ran, so extraction reads it rather than
-        drawing the routine's name a second time."""
-        result = await self._skill_extractor.extract(
-            run_id, call_link=call_link, state=state, framing=framing
-        )
-        self._extraction_result = result
-        match result:
-            case SkillExtracted(skill=skill, origin_message=origin):
-                # Learning a skill does NOT attach it (#1706): the machine makes
-                # teach and instantiate two clear turns — learn ends by reporting
-                # what it did and offering, apply binds it when the user says so —
-                # so the framework no longer folds the two together at run end.
-                return Prompt.SKILL_LEARNED_NARRATION.format(
-                    skill=render_skill_brief(skill),
-                    shape=render_skill_shape(skill),
-                    demonstrated_on=origin,
-                )
-            case NoExtraction(gate=gate):
-                logger.debug("No skill extracted from run %s (%s)", run_id, gate)
-                return None
-
     # ── Message handling ───────────────────────────────────────────────
 
     async def handle(
@@ -459,9 +248,6 @@ class ChatAgent(Agent):
         images: list[str] | None = None,
         page_context: PageContext | None = None,
         quoted_text: str | None = None,
-        state: ConversationState | None = None,
-        framing: RoundFraming | None = None,
-        shortfall: RoundShortfall | None = None,
         on_tool_start: Callable[[list[tuple[str, dict]]], Awaitable[None]] | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> ControllerResponse:
@@ -469,36 +255,18 @@ class ChatAgent(Agent):
 
         Builds context, processes images, runs agentic loop.
 
-        ``call_link`` (#2458) is REQUIRED — a top-level run starter in its own
-        right, built by the channel (``CallLink.top(run_id)``) before the state
-        classifier even draws, so the classifier, this turn, and run-end skill
-        extraction all link back to the SAME run with no ambient state and no
-        fallback.  ``run_id`` (for DB/mutation purposes — stamped on every
-        promptlog row, recorded on any collection the turn creates via
-        ``created_by_run_id``, #1566) is read off it.
+        ``call_link`` (#2458) is REQUIRED — a top-level run starter in its own right,
+        built by the channel (``CallLink.top(run_id)``) before this turn is even
+        dispatched, with no ambient state and no fallback.  ``run_id`` (for DB/
+        mutation purposes — stamped on every promptlog row, recorded on any
+        collection the turn creates via ``created_by_run_id``, #1566) is read off it.
 
-        ``state`` is the conversation machine's decision about this turn, made before
-        it began (``None`` when nothing decided it — idle).  It picks the turn's one
-        instruction, gates run-end skill extraction (#1850), and decides whether the
-        learn terminal is enforced (#1839).
-
-        ``framing`` is the round's framing, settled when the machine entered learn
-        (#1868): it renders the routine and the container into the turn's instruction, is
-        reused by run-end extraction instead of a second draw, and is what a failed learn
-        turn takes its empty container down with.
-
-        ``shortfall`` is the round's OTHER entry answer (#1885/#1894), present on a turn
-        that landed in request: it renders the routine and the detail still missing into
-        that turn's instruction, so the ask is written from a state rather than from a
-        guess.  It is the round's own state, recorded on the move and read back by the
-        channel, so a turn arriving on a parked round asks for exactly what the turn that
-        parked it asked for.
+        There is no conversation machine (#2455 naive baseline): every turn runs the
+        same ``Prompt.CONVERSATION_PROMPT`` — there is no second state to pick an
+        instruction for.
         """
         self._current_user = sender
         self._pending_page_context = page_context
-        self._extraction_result = None
-        self._turn_state = state
-        self._turn_framing = framing
         run_id = call_link.run_id
         try:
             content, has_images = await self._process_images(content, images, call_link)
@@ -523,23 +291,9 @@ class ChatAgent(Agent):
                 )
 
             logger.info("Handling message from %s (conversation mode)", sender)
-            unconfigurable = await self._unconfigurable_round(
-                state, framing, run_id, call_link, content, history
-            )
-            if unconfigurable is not None:
-                return unconfigurable
             self._install_tools(self.get_tools(run_id=run_id))
-            # The machine decided this turn's state before the turn began, so the
-            # prompt carries THAT state's single instruction (#1706).  ``None`` —
-            # no machine wired, or a state with no instruction yet — composes the
-            # unchanged default.
-            system_prompt = await self._build_system_prompt(
-                sender,
-                instructions=(
-                    conversation_prompt(state, framing, shortfall) if state is not None else None
-                ),
-            )
-            response = await self.run(
+            system_prompt = await self._build_system_prompt(sender)
+            return await self.run(
                 prompt=content,
                 max_steps=self.get_max_steps(),
                 call_link=call_link,
@@ -550,123 +304,10 @@ class ChatAgent(Agent):
                 progress_scope="foreground",
                 prompt_type=ChatPromptType.USER_MESSAGE,
             )
-            return await self._enforce_learn_terminal(state, response, run_id, call_link)
         finally:
             self._current_user = None
             self._pending_page_context = None
             self._current_message = None
-            self._turn_state = None
-            self._turn_framing = None
-
-    async def _unconfigurable_round(
-        self,
-        state: ConversationState | None,
-        framing: RoundFraming | None,
-        run_id: str,
-        call_link: CallLink,
-        content: str,
-        history: list[tuple[str, str]] | None,
-    ) -> ControllerResponse | None:
-        """An apply turn that arrived with no framing FAILED before it began (#1875) —
-        ``None`` on every other turn, which is the ordinary path untouched.
-
-        Apply configures the collection its own round set up: the container, the routine
-        and the values it is pointed at are all supplied framework-side, and the turn says
-        only the job's terms.  With no framing there is no container to configure, no
-        routine to name, and nothing the turn could truthfully report — so this is settled
-        before any tool-bearing run (#1839's shape, moved to the front of the turn because
-        there is nothing to run rather than nothing learned).  Since #2370 that fact is
-        handed to the shared last-draw-or-account building block instead of an immediate
-        canned line: one tools-off draw, over the turn's OWN messages — ``content`` and
-        ``history``, same as the ordinary run would build, so the model sees what the user
-        actually asked rather than just the bare fact — writes the reply.
-
-        The two things it must NOT do are what makes this a failure rather than a
-        fallback: instructing the turn as though it were binding the routine itself would
-        have it re-derive values it cannot see, and offering the full ``collection_configure``
-        surface would have it invent a collection for a job the round never settled.  The
-        machine is left where it stands, so the user's retry is an ordinary next message.
-
-        Checked on the conversation branch, which is where both of those live: a vision
-        turn composes no state instruction and installs no tools, so it can neither be
-        instructed to bind a routine nor claim to have configured one, and answering an
-        image with a setup failure would be a worse reply than the caption it can give."""
-        if state is not ConversationState.APPLY or framing is not None:
-            return None
-        logger.warning(
-            "Apply turn arrived with no framing — nothing to configure, narrating honestly"
-        )
-        facts = PennyResponse.FACTS_NOTHING_TO_CONFIGURE
-        system_prompt = await self._build_system_prompt(self._current_user)
-        messages = self._with_facts_turn(
-            self._build_messages(content, history, system_prompt), facts
-        )
-        return await self._narrate_or_account(
-            messages,
-            facts,
-            [],
-            run_id,
-            call_link,
-            ChatPromptType.USER_MESSAGE,
-            reason="the turn had no routine to configure",
-        )
-
-    async def _enforce_learn_terminal(
-        self,
-        state: ConversationState | None,
-        response: ControllerResponse,
-        run_id: str,
-        call_link: CallLink,
-    ) -> ControllerResponse:
-        """A learn turn that produced no skill FAILED — say so instead of replying
-        (#1839).
-
-        The learn state has exactly ONE valid terminal state: a skill in the registry.
-        The machine decided this turn was a learn turn BEFORE it ran, so at run end
-        this is a deterministic read of two recorded facts, not a judgment.  Since
-        #2370 the model's own reply is no longer thrown away for a canned line: that
-        nothing was captured is a fact handed to one more tools-off draw, over this
-        turn's own messages (``Agent._run_messages`` — reconstructed from its
-        promptlog rows, the same conversation the failed attempt happened in), so the
-        honest reply can say what was actually tried.  The tool calls travel with it
-        either way, so the run record still shows everything the turn did.
-
-        The machine is left exactly where it stands: parked in learn with its anchor,
-        so the user's retry is the existing learn→learn re-demonstration edge and a
-        bail is still the break-out to idle.  Extraction SUCCESS — and any turn where
-        extraction never ran at all (a vision turn, a run that never reached its text
-        branch and already carries its own honest failure) — takes today's path
-        untouched.
-
-        The state gate (#1850) declines every non-learn turn with its own
-        ``NoExtraction``, and this check reads the SAME state the extractor was handed,
-        so those refusals can never reach here: a turn is only failed for learning
-        nothing when learning was what it was for.
-
-        The round's CONTAINER goes with the failure (#1868): the container was built at
-        entry for a routine this turn did not learn, so leaving it would put a minutes-old
-        empty collection in the store map describing a job that is not happening.  Only an
-        empty one is retired — the guard lives with the retirement, not here."""
-        if state is not ConversationState.LEARN:
-            return response
-        if not isinstance(self._extraction_result, NoExtraction):
-            return response
-        logger.warning(
-            "Learn turn produced no skill (%s) — narrating the honest outcome instead",
-            self._extraction_result.gate,
-        )
-        discard_round_container(self.db, self._turn_framing, run_id=run_id)
-        facts = PennyResponse.FACTS_NOTHING_LEARNED
-        messages = self._with_facts_turn(self._run_messages(run_id), facts)
-        return await self._narrate_or_account(
-            messages,
-            facts,
-            response.tool_calls,
-            run_id,
-            call_link,
-            ChatPromptType.USER_MESSAGE,
-            reason="the turn captured no routine to learn",
-        )
 
     def _record_turn_failure(self, run_id: str, reason: str) -> None:
         """Stamp a chat turn that needed the honest-fallback machinery (#2355 part
@@ -759,20 +400,13 @@ class ChatAgent(Agent):
         The chat prompt opens with Penny's persona/instructions and closes with a
         deterministic **self-state header** — the dynamic tail — rendering her own
         operational situation (active mechanisms · recent activity · the store map
-        · taught skills · durable user facts) purely from the registry
+        · durable user facts) purely from the registry
         (#1566) + ledger (#1560), never a relevance guess.
 
         The ambient inversion (#1555): the chat prompt no longer injects
         **speculative user-content recall** at all.  User content is fetched on
         demand via the tools the header's pointers name (anchored by the user's
-        message).  Taught-behavior firing — dark while #1555 removed ambient
-        ``skills`` recall — is re-homed by #1471 onto the header's **Skills and
-        rules** section: the taught-skill registry (``db.skills``, the sole
-        skills store — the legacy ``skills`` collection retired with #1624)
-        renders deterministically as one row each — what a skill is and what it
-        needs (#1804) — so a taught behavior is instantiable ambiently (0 calls),
-        with its parameters and steps one ``skill_get`` call away (#2305); once
-        it is set running, ``memory_get`` carries them on the job.
+        message).
         Background agents keep the base envelope (profile + inventory) and never
         see this header — it is the chat entry point's opening state.
         """

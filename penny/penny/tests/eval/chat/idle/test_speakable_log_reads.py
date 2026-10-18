@@ -59,13 +59,15 @@ instead cannot state it, and the reply claim reads that directly.  Nor is it cla
 turn wrote or created nothing (``docs/principles.md`` §4.3): what is claimed instead is that
 what the world already held is still there, where it held anything.
 
-**The world is one the user built (#1911/migration 0108: nothing is pre-seeded).**  The two jobs
-the run-record case reads about are STANDING JOBS — a taught routine applied to two pages through
-the production instantiation seam, with real completed cycles behind them (see
-``test_standing_collection.py``, which owns that world; a second copy here would be a second
-world, free to drift).  A hand-authored prose prompt would be a config defect the collector
-cannot read (#1916's strict dialect), so a fixture seeded that way would claim jobs that could
-never have run.
+**The world is one the user built (#1911/migration 0108: nothing is pre-seeded; #2455 naive
+baseline: no skill or routine behind a job).**  The two jobs the run-record case reads about are
+STANDING JOBS — the same naive-shape job ``test_standing_collection.py`` owns (a second copy
+here would be a second world, free to drift) — with real completed cycles behind them, seeded
+through ``penny.tests.eval.end_to_end.world.seed_job_cycle``.
+
+**No claim reads where the machine landed, or a run's outcome (#2496, naive baseline).**  There
+is no conversation machine left to land on this branch, so every landing claim is dropped
+rather than ported — consistent with #2496's ruling on the naive branch generally.
 
 ``run_list`` is collector-internal rather than user-dispatchable — its argument is a
 collection source and "what did your last run do" is not a phrasing a user reaches for — so
@@ -85,23 +87,16 @@ import pytest
 
 from penny.agents.self_state import SelfStateHeader
 from penny.constants import PennyConstants, RunOutcome
-from penny.conversation_machine import ConversationState
 from penny.database import Database
-from penny.database.memory import EntryInput
 from penny.database.memory.objects import render_run_calls
-from penny.database.skills import DistillInput, SkillDraft
 from penny.penny import Penny
 from penny.tests.conftest import TEST_SENDER, require_memory
 
-# The seeded-ledger wire helpers the transition suite writes its own history with, and the
-# standing-job world the run-record case reads about — read from where they are defined rather
-# than restated, so a collector run seeded here has the same envelope every other seeded run
-# does and the jobs are the ones a real apply turn leaves behind.
-from penny.tests.eval.chat.idle.test_standing_collection import (
-    WATCH_ROUTINE,
-    StandingJob,
-    seed_standing_jobs,
-)
+# The standing-job world the run-record case reads about, and the cycle-seeding machinery every
+# job-history case shares — read from where they are defined rather than restated, so a job
+# seeded here is the same production shape a real apply turn leaves behind and a collector run
+# seeded here has the same envelope every other seeded run does.
+from penny.tests.eval.chat.idle.test_standing_collection import StandingJob, seed_standing_jobs
 from penny.tests.eval.conftest import (
     EVAL_MODELS,
     ChatEval,
@@ -110,6 +105,7 @@ from penny.tests.eval.conftest import (
     collection_entries,
     seeded_run_id,
 )
+from penny.tests.eval.end_to_end.world import _seeded_response, _wire_tool_call, seed_job_cycle
 from penny.tests.eval.utils.assertions import Answer, Cohort
 from penny.tests.eval.utils.catalogue import Area
 from penny.tests.eval.utils.cohort import (
@@ -122,7 +118,6 @@ from penny.tests.eval.utils.cohort import (
     fold_typography,
 )
 from penny.tests.eval.utils.dispatch_world import assert_surface_carries, collection_rows
-from penny.tests.eval.utils.transition_ledger import _seeded_response, _wire_tool_call
 from penny.tests.eval.utils.worlds import World
 
 pytestmark = pytest.mark.eval
@@ -154,7 +149,6 @@ _VECTOR_PROBE_LIMIT = 500
 _INCOMING = PennyConstants.MessageDirection.INCOMING
 _OUTGOING = PennyConstants.MessageDirection.OUTGOING
 _PENNY = PennyConstants.MessageAuthor.PENNY
-_COLLECTOR = PennyConstants.MessageAuthor.COLLECTOR
 
 
 # ── The case shape ───────────────────────────────────────────────────────────
@@ -181,7 +175,6 @@ class _LogReadCase(NamedTuple):
     answer: str
     ask: str
     also_phrased: tuple[str, ...]
-    skills: tuple[SkillDraft, ...] = ()
 
     @property
     def ground(self) -> World:
@@ -190,8 +183,8 @@ class _LogReadCase(NamedTuple):
         ``pages`` is EMPTY and that is the point rather than an omission: the answer lives in a
         log and nowhere else, so a browse comes back with nothing and going looking is a dead
         end instead of a second source.  ``stores`` is empty for a different reason: the
-        run-record world seeds two collections, but they are JOBS stood up through the production
-        instantiation seam rather than plain holdings, and a declared store is laid down as
+        run-record world seeds two collections, but they are JOBS stood up through the store's
+        own chokepoints rather than plain holdings, and a declared store is laid down as
         entries alone — declaring them would seed what their cycles wrote a second time.
 
         ``keeps`` and ``excludes`` are empty because the turn
@@ -341,27 +334,24 @@ def _assert_unreachable_except_by_reading(db: Database, token: str) -> None:
 
 # ── The run-record world: two standing jobs and the cycles behind them ───────
 #
-# The jobs are the standing-collection story's own world — ONE taught routine, applied to two
-# pages, so the pair is two real jobs rather than two rows shaped like jobs.  What this case
-# adds is their HISTORY: completed cycles, which is what the collector-runs index renders —
-# including one that FAILED, the cycle the case is actually about.
+# The jobs are the standing-collection story's own naive-shape world (#2455 naive baseline) —
+# two rows stood up through the store's own chokepoints, so the pair is two real jobs rather
+# than two rows shaped like jobs.  What this case adds is their HISTORY: completed cycles,
+# which is what the collector-runs index renders — including one that FAILED, the cycle the
+# case is actually about.
 
 _PATCH_NOTES_JOB = StandingJob(
-    routine=WATCH_ROUTINE,
-    values={
-        "page": "https://mistforge.example.com/patch-notes",
-        "watched_for": "balance changes",
-    },
+    container="mistforge-patch-notes",
+    url="https://mistforge.example.com/patch-notes",
+    watched_for="balance changes",
     description="Notable new Mistforge Tactics patch notes worth knowing about.",
     schedule="FREQ=HOURLY",
     notify=True,
 )
 _TRAIL_JOB = StandingJob(
-    routine=WATCH_ROUTINE,
-    values={
-        "page": "https://trails.example.com/verdant-hollow",
-        "watched_for": "trail conditions",
-    },
+    container="verdant-hollow-trail",
+    url="https://trails.example.com/verdant-hollow",
+    watched_for="trail conditions",
     description="Current conditions on the Verdant Hollow hiking trail.",
     schedule="FREQ=HOURLY",
     notify=False,
@@ -428,107 +418,57 @@ _SEEDED_CYCLES = (
 )
 
 
-def _browse_result(cycle: _SeededCycle) -> str:
-    """What the cycle's page read came back with — the finding it went on to write, the failure
-    that ended it, or nothing new on a quiet cycle.  A cycle whose trace says it read nothing
-    while its reason says it recorded a patch is a world at odds with itself, and the model
-    reads both."""
-    page, watched_for = cycle.job.values["page"], cycle.job.values["watched_for"]
-    if not cycle.closed:
-        return f"You tried to open {page} ({_BROWSE} result)\n{cycle.summary}"
-    found = cycle.wrote[1] if cycle.wrote is not None else "nothing new."
-    return f"You opened {page} ({_BROWSE} result)\n{watched_for}: {found}"
-
-
-def _read_step(cycle: _SeededCycle) -> DistillInput:
-    """The cycle's page read.  Every cycle makes one — what it comes back with is what the
-    cycle went on to do, or the reason it stopped."""
-    return DistillInput(
-        source_ordinal=1,
-        tool=_BROWSE,
-        arguments={
-            "queries": [cycle.job.values["page"]],
-            "extract": cycle.job.values["watched_for"],
-        },
-        result=_browse_result(cycle),
-    )
-
-
-def _write_step(cycle: _SeededCycle, key: str, content: str) -> DistillInput:
-    """The entry the cycle kept, as the call that kept it."""
-    return DistillInput(
-        source_ordinal=2,
-        tool=_WRITE,
-        arguments={
-            "collection": cycle.job.container,
-            "entries": [{"key": key, "content": content}],
-        },
-        result=f"You saved an entry to {cycle.job.container}: ({_WRITE} result)\nWrote 1 entry.",
-    )
-
-
-def _close_step(ordinal: int) -> DistillInput:
-    """The ``done()`` a healthy cycle ends on."""
-    return DistillInput(
-        source_ordinal=ordinal,
-        tool=PennyConstants.DONE_TOOL_NAME,
-        arguments={},
-        result=f"You finished the cycle. ({PennyConstants.DONE_TOOL_NAME} result)\nDone.",
-    )
-
-
-def _cycle_steps(cycle: _SeededCycle) -> list[DistillInput]:
+def _cycle_calls(cycle: _SeededCycle) -> list[dict]:
     """One cycle's calls, as the job's own program makes them: read the page, write what it
     found (when it found something), close.  A quiet cycle just reads and closes; a failed cycle
-    reads and stops there, because that is what its outcome means."""
-    steps = [_read_step(cycle)]
+    reads and stops there, because that is what its outcome means.
+
+    Built with ``_wire_tool_call``, the same wire shape ``seed_known_routine``'s own turns use
+    — the run's RESULT text plays no part here (``seed_job_cycle`` logs the calls alone, with
+    no accumulated ``messages`` for a result to sit in), only the calls a reader's ``run_get``
+    needs to see."""
+    run_id = cycle.run_id
+    calls = [
+        _wire_tool_call(
+            f"{run_id}-0",
+            _BROWSE,
+            {"queries": [cycle.job.url], "extract": cycle.job.watched_for},
+        )
+    ]
     if cycle.wrote is not None:
-        steps.append(_write_step(cycle, *cycle.wrote))
-    if not cycle.closed:
-        return steps
-    return [*steps, _close_step(len(steps) + 1)]
+        key, content = cycle.wrote
+        calls.append(
+            _wire_tool_call(
+                f"{run_id}-{len(calls)}",
+                _WRITE,
+                {"collection": cycle.job.container, "entries": [{"key": key, "content": content}]},
+            )
+        )
+    if cycle.closed:
+        calls.append(_wire_tool_call(f"{run_id}-{len(calls)}", PennyConstants.DONE_TOOL_NAME, {}))
+    return calls
 
 
 def _seed_run(db: Database, cycle: _SeededCycle) -> None:
-    """Seed one completed collector cycle: the ``promptlog`` row that IS its ``collector-runs``
-    content, the outcome + reason stamped on it, and — when the cycle wrote — the entry it left
-    behind, attributed to this run.
+    """Seed one completed collector cycle through the shared cycle-history helper
+    (``seed_job_cycle``): the ``promptlog`` row that IS its ``collector-runs`` content, the
+    outcome + reason stamped on it, and — when the cycle wrote — the entry it left behind,
+    attributed to this run.
 
-    That last part is what makes the world COHERE, and it was missing (#2001).  The cycle's
-    trace says it wrote and its reason says what it recorded; if the entry never lands, the
-    collection the model is pointed at is empty, no ``last_written_by_run_id`` is stamped, and
-    the self-state header silently drops the writes clause production renders (#1641).  The case
-    would then measure a world THINNER than the real one, against a "read the collections
-    instead" alternative that is a dead end rather than a wrong answer.
-
-    The envelope is built by the seeded-ledger helpers the transition suite already writes
-    history with, so a run seeded here and a run seeded there are one wire shape rather than two
-    hand-built ones free to differ.  The id is a SEEDED one, so every reader of "what did the
-    model do this sample" excludes it: a job's past cycles are history, and counting them as
-    this turn's calls would report a quiet turn as a busy one."""
-    steps = _cycle_steps(cycle)
-    calls = [_wire_tool_call(f"{cycle.run_id}-{index}", step) for index, step in enumerate(steps)]
-    db.messages.log_prompt(
-        model="seed",
-        messages=[],
-        response=_seeded_response(tool_calls=calls),
-        agent_name=_COLLECTOR,
-        run_id=cycle.run_id,
-        run_target=cycle.job.container,
-    )
-    db.messages.set_run_outcome(cycle.run_id, cycle.outcome.value, cycle.summary)
-    _seed_what_the_cycle_kept(db, cycle)
-
-
-def _seed_what_the_cycle_kept(db: Database, cycle: _SeededCycle) -> None:
-    """The entry a cycle wrote, landed in the job's collection under that cycle's OWN run id —
-    so the write is attributed the way production attributes it, and the header renders the
-    writes clause it renders in a real deployment."""
-    if cycle.wrote is None:
-        return
-    key, content = cycle.wrote
-    require_memory(db, cycle.job.container).write(
-        [EntryInput(key=key, content=content)], author=_COLLECTOR, run_id=cycle.run_id
+    That last part is what makes the world COHERE, and it was missing once (#2001).  The
+    cycle's trace says it wrote and its reason says what it recorded; if the entry never
+    lands, the collection the model is pointed at is empty, no ``last_written_by_run_id`` is
+    stamped, and the self-state header silently drops the writes clause production renders
+    (#1641).  The case would then measure a world THINNER than the real one, against a "read
+    the collections instead" alternative that is a dead end rather than a wrong answer."""
+    seed_job_cycle(
+        db,
+        container=cycle.job.container,
+        run_name=cycle.name,
+        calls=_cycle_calls(cycle),
+        outcome=cycle.outcome,
+        summary=cycle.summary,
+        wrote=cycle.wrote,
     )
 
 
@@ -615,7 +555,6 @@ async def _drive(chat_eval: ChatEval, model: str, case: _LogReadCase) -> Cohort:
         area=case.area,
         model=model,
         seed=case.seed,
-        seed_skills=list(case.skills),
         prepare=_probe(case),
         world=case.ground,
         ask=case.ask,
@@ -673,9 +612,6 @@ async def test_what_she_said_comes_back_out_of_her_own_messages(
     is what turns "did she look back" from an assumption into something the answer itself
     settles."""
     cohort = await _drive(chat_eval, model, _PENNY_MESSAGES)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — the reply carries the word her own message holds, and only that message holds.
     # No preservation claim: the world holds no collection, only the conversation, and the
     # conversation is the log the answer is read out of.
@@ -714,7 +650,6 @@ _COLLECTOR_RUNS_CASE = _LogReadCase(
         "the reason",
         "check in on your background jobs for me — and if one of them isn't working, why not?",
     ),
-    skills=(WATCH_ROUTINE,),
 )
 
 
@@ -732,9 +667,6 @@ async def test_why_a_job_is_in_trouble_comes_out_of_the_run_record(
     the same introspection ask, and the clause makes the answer live somewhere only a read can
     reach."""
     cohort = await _drive(chat_eval, model, _COLLECTOR_RUNS_CASE)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — the reply carries the word only the run record holds, and the two jobs the world
     # started with are still there as they were.
     cohort.assert_the_reply_answers_the_ask()
@@ -789,17 +721,12 @@ def _seed_the_failed_turn(db: Database) -> None:
     `parent_tool_call_id`, exactly as production links one), and the run stamped FAILED
     with the reason the header's activity line — and `run_get` — both carry."""
     run_id = seeded_run_id("failed-browse-turn")
-    browse_step = DistillInput(
-        source_ordinal=1,
-        tool=_BROWSE,
-        arguments={"queries": [_FAILED_PAGE], "extract": _FAILED_EXTRACT_ASK},
-        result="",
-    )
+    browse_args = {"queries": [_FAILED_PAGE], "extract": _FAILED_EXTRACT_ASK}
     call_id = f"{run_id}-0"
     db.messages.log_prompt(
         model="seed",
         messages=[],
-        response=_seeded_response(tool_calls=[_wire_tool_call(call_id, browse_step)]),
+        response=_seeded_response(tool_calls=[_wire_tool_call(call_id, _BROWSE, browse_args)]),
         agent_name=PennyConstants.CHAT_AGENT_NAME,
         run_id=run_id,
     )
@@ -889,9 +816,6 @@ async def test_what_went_wrong_comes_out_of_the_turns_own_record(
     answer and which this case does not need (there is no "job" here to ask a cause about,
     only a turn)."""
     cohort = await _drive(chat_eval, model, _FAILED_TURN_CASE)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — the reply carries the word only the turn's own record holds.  No preservation
     # claim: the world holds no collection and no mechanism for the turn to have disturbed.
     cohort.assert_the_reply_answers_the_ask()

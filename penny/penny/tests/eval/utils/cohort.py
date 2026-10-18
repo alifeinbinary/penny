@@ -1,8 +1,8 @@
 """The cohort: one request, K phrasings, pooled — and the line between what a case ASSERTS
 and what it MEASURES (#1994/#1995).
 
-**Asserted** is the state the round LEFT BEHIND: where the machine landed, what the store
-holds, and that every specific value in the reply traces to something the model was given.
+**Asserted** is the state the round LEFT BEHIND: what the store holds or survived, and that
+every specific value in the reply traces to something the model was given.
 Deterministic reads with a pass-rate floor.
 
 **Measured** is everything the model CHOSE: which tools it called and in what order, the shape
@@ -353,23 +353,12 @@ class SampleObservation(BaseModel):
     arm: int = -1
     complete: bool = True
     exclusion: str | None = None
-    landed: str | None = None
-    # The routine the move NAMED, off the landed transition's own ``skill_name`` — which
-    # routine the decision recognised as covering the ask, before anything was stood up.
-    # Beside ``landed`` because it is the same row and the same reading: where the machine
-    # went, and what it went there about.  ``None`` where the move named none, which is a
-    # real reading (an ordinary chat turn names no routine) and not a missing one.
-    decision_skill: str | None = None
-    # WHEN the landed move was recorded, and the timezone the user's profile carries — the
-    # two facts a claim about a job's end is read against, since an ask states its end on the
-    # user's own clock ("tonight", "sunday night") relative to the turn that carried it.
+    # WHEN the turn's last machine move was recorded, and the timezone the user's profile
+    # carries — the two facts a claim about a job's end is read against, since an ask states
+    # its end on the user's own clock ("tonight", "sunday night") relative to the turn that
+    # carried it.
     turn_at: datetime | None = None
     timezone: str | None = None
-    # The parameters the round is still WAITING ON, off the landed transition's own
-    # ``round_shortfall`` — their declared names, in the routine's declared order.  Empty
-    # where the move recorded no shortfall, which is the ordinary reading (only a move landing
-    # in request carries one) and not a missing one.
-    awaiting: list[str] = Field(default_factory=list)
     # The ordered moves this sample's driver walked, in the VOCABULARY of the observer that
     # read it: a chat sample carries the conversation machine's own walk (``idle→learn,
     # learn→apply``, or ``no move`` when it recorded none), a collector sample the ordered
@@ -463,6 +452,11 @@ class SampleObservation(BaseModel):
     # empty; an end-to-end sample's job-terms and store claims read it instead of ``held``/
     # ``notifications``, which stay at their chat-phase values (#2375).
     cycles: list[CycleSnapshot] = Field(default_factory=list)
+    # How many of the script's turns were actually SENT, for an end-to-end sample — the first
+    # unconditionally, every one after it only while no job existed yet (#2494).  A pure chat
+    # or collector sample leaves the default: this is the end-to-end driver's own count, read
+    # nowhere else.
+    turns_driven: int = 0
 
     @property
     def stored_text(self) -> str:
@@ -620,6 +614,14 @@ ROUTINE_NAME = Feature(
     absent="none",
 )
 ENTRIES_STORED = Feature("entries stored", lambda o: str(len(o.entries)))
+# How many of an end-to-end script's turns were actually sent (#2494) — a Penny who stands
+# the job up on the first turn and a Penny who asks first and is walked through it both reach
+# the same claims, so a different count is not a different end state: it is the mechanism's
+# own spread, reported beside the routine naming spread rather than read as a fact about any
+# one sample.
+TURNS_DRIVEN = Feature(
+    "turns sent", lambda o: str(o.turns_driven), consequence=Consequence.COSMETIC
+)
 # The CONVERSATION MACHINE's walk, as a chat observer reads it: ``no move`` is what it returns
 # for a sample whose machine recorded no transition at all, so the blindness guard has a
 # reading it can actually fire on.
@@ -1281,7 +1283,7 @@ def per_sample_cost(
 
 
 class SpecCategory(StrEnum):
-    """Which of the design's three kinds of deterministic assertion a claim is.
+    """Which of the design's two kinds of deterministic assertion a claim is.
 
     The list is CLOSED and the field is REQUIRED, which is the whole point: a check that fits no
     category cannot be declared, so the audit is a fact the code states rather than a review
@@ -1295,7 +1297,6 @@ class SpecCategory(StrEnum):
     anchors to, while ``category`` says which part of the design it satisfies.  Neither is
     derivable from the other — PROVENANCE has both a store-side claim and a reply-side one."""
 
-    LANDED = "landed"
     STORE = "store"
     PROVENANCE = "provenance"
 
@@ -1821,6 +1822,11 @@ _INVISIBLE_BREAKS = "\u00ad\u200b\u200c\u200d\u2060\ufeff"
 _JOIN_INSIDE_A_WORD = re.compile(
     rf"(?<=[^\W\d_])[{re.escape(_HYPHENS + _INVISIBLE_BREAKS)}]+(?=[^\W\d_])"
 )
+# The visible hyphen alone (never an invisible break, which draws nothing and so is never a
+# boundary) BETWEEN TWO LETTERS, the same mark ``_JOIN_INSIDE_A_WORD`` fuses, read the other
+# way: a mark a world could equally have written as the gap between two words.  `camera-kit`
+# and `camera kit` are the same run of words this folds to either side of (#2529).
+_HYPHEN_BETWEEN_LETTERS = re.compile(rf"(?<=[^\W\d_])[{re.escape(_HYPHENS)}]+(?=[^\W\d_])")
 
 
 def fold_for_token_match(text: str) -> str:
@@ -1840,16 +1846,34 @@ def fold_for_token_match(text: str) -> str:
     return fold_typography("".join(kept))
 
 
+def fold_hyphen_to_space(text: str) -> str:
+    """``text`` with each word's own hyphen turned into a SPACE, then folded through
+    ``fold_typography`` — the two-word reading of a hyphenated run, beside the one-word reading
+    ``fold_for_token_match`` gives it.  Addresses are left as written, for the reason
+    ``fold_for_token_match`` leaves them: a hyphen inside a domain names a different site, not
+    a word boundary.  ``token_stands_in`` asks both readings (#2529)."""
+    kept: list[str] = []
+    cursor = 0
+    for address in _URL_PATTERN.finditer(text):
+        kept += [_HYPHEN_BETWEEN_LETTERS.sub(" ", text[cursor : address.start()]), address.group()]
+        cursor = address.end()
+    kept.append(_HYPHEN_BETWEEN_LETTERS.sub(" ", text[cursor:]))
+    return fold_typography("".join(kept))
+
+
 def token_stands_in(token: str, text: str) -> bool:
     """Whether a token the world names stands in ``text`` — a reply, or an entry.
 
     THE ONE token match, for every claim that looks for a world's token.  The token stands
-    there as written (typography folded, the comparison this has always been), or as the same
-    word hyphenated another way.  Either reading is the token; neither makes a different word
-    one."""
-    return fold_typography(token) in fold_typography(text) or fold_for_token_match(
-        token
-    ) in fold_for_token_match(text)
+    there as written (typography folded, the comparison this has always been), as the same
+    word hyphenated another way, or as the same run of words with its hyphen read as the gap
+    between them (`camera-kit-price-watch` standing in for `camera kit`, #2529).  Any of these
+    readings is the token; none of them makes a different word one."""
+    return (
+        fold_typography(token) in fold_typography(text)
+        or fold_for_token_match(token) in fold_for_token_match(text)
+        or fold_hyphen_to_space(token) in fold_hyphen_to_space(text)
+    )
 
 
 _POSSESSIVE = "'s"
@@ -2122,6 +2146,45 @@ _LIST_SEPARATOR = ","
 _DECIMAL_POINT = "."
 _PLAIN_DECIMAL = re.compile(r"\d+(?:\.\d+)?")
 _ZERO = "0"
+# The cardinal number words zero through twenty, each the digit it spells — a closed list, so
+# ``four`` sources ``4`` and ``4`` sources ``four`` by the same reading a figure written two
+# ways already shares, never a word read in because one case happened to write it (#2529).
+#
+# A number word HYPHENATED to another word is not a number said aloud — it is a compound, the
+# way a hyphen joins any other two words into one (`One-pot orzo`, `twenty-four`) — so neither
+# side of the word is read as a figure.  MEASURED: without this, a recipe titled `One-pot orzo`
+# sourced an invented `1 tsp` nowhere the round actually stated a quantity.
+_NUMBER_WORDS = {
+    word: str(value)
+    for value, word in enumerate(
+        (
+            "zero",
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "ten",
+            "eleven",
+            "twelve",
+            "thirteen",
+            "fourteen",
+            "fifteen",
+            "sixteen",
+            "seventeen",
+            "eighteen",
+            "nineteen",
+            "twenty",
+        )
+    )
+}
+_NUMBER_WORD = re.compile(
+    rf"(?<![{re.escape(_HYPHENS)}])\b({'|'.join(_NUMBER_WORDS)})\b(?![{re.escape(_HYPHENS)}])"
+)
 # What a word is made of once folded.  The name grammar is ASCII, so the world's words are cut
 # on the same alphabet: a reply's `Café` is read as `Caf`, and so is the world's.  A digit run
 # is a token of its own so two words either side of a figure are not side by side.
@@ -2182,8 +2245,19 @@ def _told(hour: int, minutes: str) -> list[str]:
 
 
 def _figures(folded: str) -> frozenset[str]:
-    """Every form of every number ``folded`` states."""
-    return frozenset(form for readings in _figure_readings(folded) for form in readings)
+    """Every form of every number the WORLD's content states, the words it spells its small
+    numbers in included: a world that says ``four`` sources a reply or an entry that states
+    ``4`` (#2529).  Generic by construction — the closed list is every cardinal zero through
+    twenty, never a word a particular case happens to use.
+
+    Called ONLY on the given side (``_read_world`` reads it off ``content``, never off the text
+    a claim is checking).  A number word is ordinary prose everywhere else: the specific-value
+    grammar (``_SPECIFIC``/``_NUMBER``) only ever recognises a number written in DIGITS, so
+    ``one`` or ``two`` in a reply or a stored entry is never itself a value that needs sourcing
+    — only a digit a reply states can be, and this is what it is checked against."""
+    return frozenset(form for readings in _figure_readings(folded) for form in readings) | (
+        frozenset(_NUMBER_WORDS[word] for word in _NUMBER_WORD.findall(folded))
+    )
 
 
 def _months_named(folded: str) -> list[str]:

@@ -27,7 +27,7 @@ a case is one entry condition:
   (``chat-reply-says-nothing-is-stored``), and a store that already holds what she is asked
   to record (``chat-reply-says-already-there``).  A correct sample for one is wrong for the
   other two, and what a claim can read differs by entry condition.  On the first two the
-  claims are where the machine landed and that every specific value stored or said traces to
+  claims are that every specific value stored or said traces to
   what she was given; whether the reply SAYS the lookup failed, or that nothing is recorded,
   is prose and is measured as reply spread.
 
@@ -120,7 +120,6 @@ from typing import NamedTuple
 import pytest
 
 from penny.constants import PageReading
-from penny.conversation_machine import ConversationState
 from penny.database import Database
 from penny.database.memory import MemoryType
 from penny.penny import Penny
@@ -169,8 +168,7 @@ _HONESTY_FAMILY = "chat-honesty"
 # ``ROUTINE_SHAPE`` and ``ROUTINE_NAME`` are OUT: an idle turn that answers a question mints
 # no routine, so every sample reads each feature's own declared ``absent`` value, the pooler
 # marks the case BLIND and the report renders a red row with no proposed ceiling — on all five
-# cases, reporting the fixture rather than the behaviour.  A routine is minted only by a turn
-# that lands in learn, which the landing claim already reads.
+# cases, reporting the fixture rather than the behaviour.
 #
 # ``ENTRIES_STORED`` is IN, and it is where a write the turn chose to make shows: a cohort
 # that answered and wrote nothing reads ``"0"`` on every sample, and a sample that wrote
@@ -877,8 +875,7 @@ _ANSWER_FROM_PAGE = _AnsweringCase(
     area=Area.ANSWERING_FROM_THE_WEB,
     behaviour=(
         "In the chat agent, when a question needs a current fact nothing stored can answer, "
-        "Penny opens the page it is posted on and puts that page's own value in her reply, "
-        "and the turn ends back in idle."
+        "Penny opens the page it is posted on and puts that page's own value in her reply."
     ),
     family=_ANSWER_FAMILY,
     world=_MUSEUM_WORLD,
@@ -892,7 +889,7 @@ _ANSWER_ONE_LINK_DEEP = _AnsweringCase(
     behaviour=(
         "In the chat agent, when the fact a question asks for is not on the page she reaches "
         "first but that page names the address it is credited at, Penny follows the link and "
-        "answers out of the second page, and the turn ends back in idle."
+        "answers out of the second page."
     ),
     family=_ANSWER_FAMILY,
     world=_GALLERY_WORLD,
@@ -907,8 +904,8 @@ _ANSWER_PARTLY_FROM_A_REAL_SIZE_PAGE = _AnsweringCase(
     behaviour=(
         "In the chat agent, when a question asks for several things off a real-size page and "
         "the page answers some of them but carries nothing at all for one, Penny opens the "
-        "page, puts what it supplies in her reply, invents nothing for the part it doesn't "
-        "have, and the turn ends back in idle."
+        "page, puts what it supplies in her reply, and invents nothing for the part it "
+        "doesn't have."
     ),
     family=_ANSWER_FAMILY,
     world=_PORTLINE_WORLD,
@@ -929,7 +926,7 @@ _ANSWER_TOP_HEADLINES_PAST_A_RUNON_LABEL = _AnsweringCase(
         "whose top three carry no description and a later link's own label runs directly "
         "into a description with no separating space, Penny's turn ends in a reply of her "
         "own that states the three headlines and their links, invents no description for "
-        "them, and the turn ends back in idle — however long the extractor took to settle."
+        "them, however long the extractor took to settle."
     ),
     family=_ANSWER_FAMILY,
     world=_RUNON_HEADLINES_WORLD,
@@ -947,7 +944,7 @@ _ADMITS_THE_READ_FAILED = _AnsweringCase(
     area=Area.ANSWERING_FROM_THE_WEB,
     behaviour=(
         "In the chat agent, when every source she tries is unreachable, everything Penny says "
-        "in her reply traces to what she was given, and the turn ends back in idle."
+        "in her reply traces to what she was given."
     ),
     family=_HONESTY_FAMILY,
     world=_UNREACHABLE_WORLD,
@@ -962,7 +959,7 @@ _SAYS_NOTHING_IS_STORED = _AnsweringCase(
     behaviour=(
         "In the chat agent, when the question is about something the user has told her and "
         "the store holds nothing of it, everything Penny says in her reply traces to what she "
-        "was given, and the turn ends back in idle."
+        "was given."
     ),
     family=_HONESTY_FAMILY,
     world=_COLD_STORE_WORLD,
@@ -1033,9 +1030,6 @@ async def test_the_page_s_own_value_comes_back_in_the_reply(
     traces to what the model was given (nothing invented).  A reply that answered nothing at
     all would satisfy every other claim here vacuously."""
     cohort = await _drive(chat_eval, model, _ANSWER_FROM_PAGE)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE
     cohort.assert_the_reply_answers_the_ask()
 
@@ -1058,9 +1052,6 @@ async def test_the_value_one_link_deep_comes_back_in_the_reply(
     the value arrived, however she got there; what ``TOOL_SEQUENCE`` says is how a cohort that
     stopped hopping looks."""
     cohort = await _drive(chat_eval, model, _ANSWER_ONE_LINK_DEEP)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE
     cohort.assert_the_reply_answers_the_ask()
 
@@ -1081,12 +1072,8 @@ async def test_a_compound_ask_over_a_real_size_page_gets_what_is_there_and_inven
     Whether she hunts for the missing half, and how much that costs, is MEASURED
     (``TOOL_SEQUENCE``, token cost) and never fixed — the #2373 ruling.  The bar this case
     holds her to is the honest end state: the three headlines she can answer come back
-    sourced, nothing stands in for the editor nobody gave her, and the turn still lands in
-    idle."""
+    sourced, and nothing stands in for the editor nobody gave her."""
     cohort = await _drive(chat_eval, model, _ANSWER_PARTLY_FROM_A_REAL_SIZE_PAGE)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE
     cohort.assert_the_reply_answers_the_ask()
 
@@ -1148,9 +1135,6 @@ async def test_a_run_on_label_near_the_top_headlines_still_ends_in_an_honest_rep
     page gives none for any of them.
     """
     cohort = await _drive(chat_eval, model, _ANSWER_TOP_HEADLINES_PAST_A_RUNON_LABEL)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — completeness: the reply states what the page actually gives (the three
     # headlines and their links).  A silent or canned reply fails this vacuously, which is
     # the "never silence" fact stated as an assertion rather than a prose rule.
@@ -1182,9 +1166,6 @@ async def test_a_failed_read_is_answered_only_from_what_she_was_given(
     Whether the reply NAMES the failure is prose and is not claimed; it is read on the modal
     sample and shows in the reply spread."""
     cohort = await _drive(chat_eval, model, _ADMITS_THE_READ_FAILED)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — EMPTY, and that is the correct report: nothing was seeded, so there is nothing
     # to survive, and the world carries no answer, so a reply-answers claim over it would
     # state a contract this ask cannot make.
@@ -1209,9 +1190,6 @@ async def test_an_empty_store_is_answered_only_from_what_she_was_given(
     also stood somewhere up to keep an answer in is its own call on an empty store, and shows
     in ``TOOL_SEQUENCE`` and ``ENTRIES_STORED``."""
     cohort = await _drive(chat_eval, model, _SAYS_NOTHING_IS_STORED)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — EMPTY, and that is the correct report: the store holds nothing, so there is
     # nothing to survive and no value the reply owes, and a reply-answers claim would state a
     # contract this entry condition cannot make.
@@ -1245,9 +1223,6 @@ async def test_a_second_telling_leaves_the_interest_where_it_was_kept(
     so what is claimed is the store: the interest still held in the collection that had it,
     and everything else it held still there, unchanged."""
     cohort = await _drive(chat_eval, model, _SAYS_ALREADY_THERE)
-    # LANDED
-    cohort.assert_machine_landed(ConversationState.IDLE)
-
     # STORE — the reply-answers claim is ABSENT and that is the correct report: the ask
     # supplies its own subject, so a token in the reply would prove nothing about a read.
     cohort.claim(

@@ -15,7 +15,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from penny.constants import PennyConstants
-from penny.conversation_machine import ConversationState
 from penny.database.models import MemoryEntry
 from penny.datetime_utils import format_log_timestamp
 from penny.responses import PennyResponse
@@ -55,6 +54,7 @@ from penny.tests.eval.utils.cohort import (
     proposed_ceiling,
     specifics,
     text_spread,
+    token_stands_in,
     unsourced_specifics,
     variance_headline,
 )
@@ -903,7 +903,6 @@ def _stored(name: str, content: str, key: str | None = None) -> SampleObservatio
         name=name,
         phrasing="the ask",
         arm=0,
-        landed="idle",
         entries=[entry],
         given=Given(_GAME_PAGE),
     )
@@ -1007,7 +1006,6 @@ def _round(name: str, *, container: str | None, wrote: str | None) -> SampleObse
         name=name,
         phrasing="the ask",
         arm=0,
-        landed=ConversationState.LEARN.value,
         container=container,
         entries=entries,
         given=Given(wrote or ""),
@@ -1107,6 +1105,34 @@ def test_a_token_in_an_entry_is_read_however_its_word_was_hyphenated():
     ]
 
 
+def test_a_hyphenated_slug_stands_in_for_its_two_word_name():
+    """MEASURED (#2529): a sample named both jobs by quoting their slugs —
+    `camera-kit-price-watch` — and the claim that it STATES THE ANSWER read `camera kit` as
+    never said, because a hyphen between two letters only ever fused them into one word.
+    Folding it to a space as well is the other reading the same slug stands for."""
+    reply = "I'm tracking the camera-kit-price-watch job and the turntable-price-watch job."
+    assert token_stands_in("camera kit", reply)
+    # An unrelated hyphenated word is still a different phrase — never matched by chance.
+    assert not token_stands_in("turntable kit", "the camera-kit-price-watch job")
+
+
+def test_a_number_word_sources_its_digit_but_not_a_different_one():
+    """MEASURED (#2529): a stored entry paraphrased the page's `four players` as `4-player`,
+    and the provenance claim read `4` as invented because a number word and the digit it
+    spells were never the same value."""
+    assert unsourced_specifics("a 4-player mode", "it supports four players") == []
+    # An unrelated number is still a different value.
+    assert unsourced_specifics("a 5-player mode", "it supports four players") == ["5"]
+
+
+def test_a_number_word_in_the_reply_is_never_itself_a_specific():
+    """The equivalence runs ONE way (#2529): a number word sources a digit the WORLD states it
+    for, but a number word in the reply is ordinary prose, not a quantity the reply is on the
+    hook to source — `one` especially is rarely a count.  Against given content with no digit
+    at all, a reply free with `one` and `two` states no specific that needs sourcing."""
+    assert unsourced_specifics("one of the two jobs", "your jobs are listed below") == []
+
+
 def test_a_url_runs_only_as_far_as_the_address_does():
     """Whatever the prose puts beside a URL is the prose's, not the address's.
 
@@ -1160,7 +1186,6 @@ def test_the_reply_provenance_claim_reads_a_wrapped_url_as_sourced():
         name="s0",
         phrasing="the ask",
         arm=0,
-        landed="idle",
         reply=f"i read `{_CITED}` today",
         given=Given(_GIVEN),
     )
@@ -1261,7 +1286,7 @@ def test_a_name_the_page_never_carried_is_still_caught_beside_the_tags():
 # ── What the reply states ────────────────────────────────────────────────────
 def _reply_sample(reply: str) -> SampleObservation:
     """A sample whose reply is exactly this."""
-    return SampleObservation(name="s0", phrasing="the ask", arm=0, landed="idle", reply=reply)
+    return SampleObservation(name="s0", phrasing="the ask", arm=0, reply=reply)
 
 
 def test_a_reply_that_answers_nothing_fails_the_only_completeness_claim():
@@ -1335,24 +1360,25 @@ def test_a_reply_claim_fails_a_sample_that_aborted_on_a_model_error():
     """The framework's own apology states no value of the model's, so a REPLY-kind claim must
     not count it as a reply that held — one enforcement point, in ``Cohort._answer``, reached
     whichever claim is asked.  A STATE claim about the same sample answers its structural fact
-    exactly as it always did: the turn ran, and where it landed is a fact independent of what
-    its reply said."""
+    exactly as it always did: the turn ran, and the store's end state is a fact independent of
+    what its reply said."""
     world = World(name="base", pages=(), keeps=(), excludes=(), answers=("baikal",))
     aborted = SampleObservation(
         name="s0",
         phrasing="the ask",
         arm=0,
-        landed="idle",
         reply=PennyResponse.AGENT_MODEL_ERROR,
         aborted_on_model_error=True,
     )
     cohort = Cohort("case", _MODEL, [aborted], _one_arm(world))
-    cohort.assert_machine_landed(ConversationState.IDLE)
     cohort.assert_the_reply_answers_the_ask()
     cohort.assert_every_value_in_the_reply_is_sourced()
+    cohort.assert_the_running_mechanisms_survive()
 
-    state_claim, answers_claim, sourced_claim = cohort.claims
-    assert (state_claim.passed, state_claim.total) == (1, 1), "the landed-state fact is untouched"
+    answers_claim, sourced_claim, survival_claim = cohort.claims
+    assert (survival_claim.passed, survival_claim.total) == (1, 1), (
+        "the store fact is untouched by the abort"
+    )
     for reply_claim in (answers_claim, sourced_claim):
         assert (reply_claim.passed, reply_claim.total) == (0, 1)
         assert reply_claim.rationales == ["the turn ended on a model error — no reply to read"]
@@ -1367,7 +1393,6 @@ def test_a_reply_that_merely_quotes_the_apologys_words_is_read_as_a_reply():
         name="s0",
         phrasing="the ask",
         arm=0,
-        landed="idle",
         reply=f'Earlier I said "{PennyResponse.AGENT_MODEL_ERROR}" but it reconnected — done.',
         aborted_on_model_error=False,
     )
@@ -1396,14 +1421,12 @@ def test_no_claim_can_opt_out_of_being_scored():
     render without counting is a claim that could hold a case's number up while failing."""
     world = World(name="base", pages=(), keeps=(("499",),), excludes=())
     samples = [
-        SampleObservation(
-            name=f"s{i}", phrasing="the ask", arm=0, landed="learn", reply="x", given=Given("x")
-        )
+        SampleObservation(name=f"s{i}", phrasing="the ask", arm=0, reply="x", given=Given("x"))
         for i in range(2)
     ]
     cohort = Cohort("case", "m", samples, _one_arm(world))
-    cohort.assert_machine_landed(ConversationState.LEARN)
     cohort.assert_every_value_in_the_reply_is_sourced()
+    cohort.assert_every_value_in_the_store_is_sourced()
 
     checks = _cohort_checks(cohort)
     assert set(checks) == {"s0", "s1"}

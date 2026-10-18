@@ -44,11 +44,11 @@ prices: ``$499`` before the change and ``$449`` after.  So these cases can say w
 holds by name.  The two prices are mutually exclusive — neither is a substring of the other —
 because the moved case asserts one is present and the other gone.
 
-**The LANDED category is empty on all three, and that is the correct report.**  ``LANDED`` is
-read off the conversation machine's walk, and a collector moves no conversation machine.  The
-run record's outcome and its stop reason are tempting to file there, but they are RECORD
-FIELDS, which ``STORE`` covers literally — so that is where they are claimed, and the state
-section renders empty rather than having something invented to fill it.
+**No claim reads the machine, and none reads how a run ended (#2496).**  A collector moves
+no conversation machine, so there was never a landing to claim; and a cycle's run outcome and
+stop reason are the run record's own fields — retired as claims — so what each case asserts is
+what the store holds, what reached the user, and provenance.  How a cycle went is still
+MEASURED, as the cycle script below.
 
 The first three cases are the whole of the collector's enactment coverage for a page whose
 only hazard is OTHER PRODUCTS' prices.  A watch over a different page, a different datum or a
@@ -69,21 +69,8 @@ from typing import NamedTuple
 
 import pytest
 
-from penny.constants import WRITE_GATE_STOP_REASONS, RunOutcome, WriteGateOutcome
 from penny.database import Database
 from penny.database.memory import EntryInput
-from penny.database.skills import (
-    SkillDraft,
-    SkillParameter,
-    SkillStep,
-    SkillSubKind,
-    SkillSubstitution,
-    bind_parameters,
-    render_skill,
-    retarget_writes,
-    slug_skill_name,
-)
-from penny.program import program_calls
 from penny.tests.eval.conftest import (
     EVAL_MODELS,
     CollectorCyclesEval,
@@ -133,10 +120,6 @@ _SCHEDULE = "FREQ=HOURLY"
 # write gate compares a candidate against what is stored UNDER THE SAME KEY, so a preseeded
 # row under any other key would leave the unchanged case with nothing to be unchanged against.
 _KEY = "asking price"
-
-# The STOP a no-change cycle ends on, as the run record states it — read from the shipped
-# table rather than restated, so a reworded reason cannot silently stop matching.
-_STOP_REASON = WRITE_GATE_STOP_REASONS[WriteGateOutcome.KEY_EXISTS_UNCHANGED]
 
 # ── The facts, held constant across every arm ────────────────────────────────
 #
@@ -840,116 +823,36 @@ def _world(
     )
 
 
-def _skill(reading: Reading) -> SkillDraft:
-    """The routine the user taught, in the shape run-end extraction leaves behind.
+def _prompt(reading: Reading) -> str:
+    """The job's free-text instructions (#2455 naive baseline) — what a job's own
+    ``extraction_prompt`` carries verbatim, with no skill/program rendering seam.
 
-    ONE shape for every arm and every case — the same two steps, the same placeholders, the
-    same bound url, the same attachment mark on the destination.  The one thing that differs is
-    the ``extract`` substitution's DESCRIPTION, which is what ``render_skill`` prints into the
-    program and therefore the only natural language a cycle reads.  The demonstrated
-    ``arguments["extract"]`` stays constant across the arms because it never renders: the
-    labeller's description replaces it at the seam."""
-    return SkillDraft(
-        name="watch_listing_price",
-        intent="Keep an eye on what this listing is asking, and tell me when it changes.",
-        description="Read a listing page and record the price it is asking.",
-        steps=[
-            SkillStep(
-                ordinal=1,
-                source_ordinal=1,
-                tool="browse",
-                arguments={"queries": [LISTING_URL], "extract": "the asking price"},
-                substitutions=[
-                    SkillSubstitution(
-                        path=["queries", 0],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description="the listing page to read",
-                    ),
-                    SkillSubstitution(
-                        path=["extract"],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description=reading.extract,
-                    ),
-                ],
-            ),
-            SkillStep(
-                ordinal=2,
-                source_ordinal=2,
-                tool="collection_write",
-                arguments={
-                    "collection": _CONTAINER,
-                    "entries": [{"key": _KEY, "content": _BASELINE_PRICE}],
-                },
-                substitutions=[
-                    SkillSubstitution(
-                        path=["collection"],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description="the collection this is set up on",
-                        attachment=True,
-                    ),
-                    SkillSubstitution(
-                        path=["entries", 0, "content"],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description="the asking price as the page states it",
-                    ),
-                ],
-            ),
-        ],
-        parameters=[
-            SkillParameter(
-                name="listing",
-                description="the listing page to read each run",
-                value=LISTING_URL,
-            )
-        ],
-        source_run_id=_SEED_AUTHOR,
+    ONE shape for every arm and every case — the same page, the same destination.  The
+    one thing that differs is the EXTRACT phrase, which is what the test asserts moved —
+    the same axis the deleted skill fixture varied through a substitution's description."""
+    return (
+        f"Read {LISTING_URL} and note {reading.extract}. If it's different from what "
+        f"'{_CONTAINER}' already holds under the key '{_KEY}', update it there."
     )
 
 
-def _program(reading: Reading) -> str:
-    """The program the apply turn stores, through the production instantiation seam's own
-    three steps in its own order: the attachment bound to the container, the runtime join
-    writing the bound value into the leaf the demonstration put its own value in, then the
-    render."""
-    skill = _skill(reading)
-    values = {"listing": LISTING_URL}
-    attached = retarget_writes(skill.steps, _CONTAINER)
-    joined = bind_parameters(attached, skill.parameters, values)
-    return render_skill(joined, values)
-
-
-def _extract_slot(reading: Reading) -> str:
-    """How this arm's instruction renders inside the program — the one span that moves."""
-    return f"extract={{{reading.extract}}}"
-
-
 def _seeder(case: WatchCase, reading: Reading):
-    """The world this case's cycle starts in: the routine in the registry, a container
-    configured from it, and the ENTRY CONDITION — then every claim that world makes, asserted
-    out loud.
+    """The world this case's cycle starts in: a job already configured with its prompt,
+    and the ENTRY CONDITION — then every claim that world makes, asserted out loud.
 
-    The entry condition goes down through the store's own write path, under the key the program
-    writes to, so the row carries the stamps and the embeddings a real cycle's write would have
-    left.  Hand-inserting it would give the write gate something to compare against that no
-    cycle could have produced, and the case would then measure the gate against a shape
-    production never sees.
-
-    The probe is not ceremony.  A program the strict parser cannot read leaves the cycle with a
-    surface of the terminator alone, and a cycle with no browse writes nothing for the most
-    boring reason there is — which is the exact shape of a passing sample on the claims below.
-    Each failure costs a live cycle per sample to not notice."""
+    The entry condition goes down through the store's own write path, under the key the
+    prompt writes to, so the row carries the stamps and the embeddings a real cycle's
+    write would have left.  Hand-inserting it would give the write gate something to
+    compare against that no cycle could have produced, and the case would then measure
+    the gate against a shape production never sees."""
 
     def seed(db: Database) -> None:
-        skill = _skill(reading)
-        db.skills.upsert(skill, author=_SEED_AUTHOR)
         db.memories.create_collection(
             _CONTAINER,
             _CONTAINER_DESCRIPTION,
-            extraction_prompt=_program(reading),
+            extraction_prompt=_prompt(reading),
             schedule=_SCHEDULE,
             notify=True,
-            skill_name=slug_skill_name(skill.name),
-            skill_params={"listing": LISTING_URL},
         )
         if case.stored is not None:
             memory = db.memory(_CONTAINER)
@@ -966,30 +869,21 @@ def _seeder(case: WatchCase, reading: Reading):
 
 def _assert_the_watch_world(db: Database, case: WatchCase, reading: Reading) -> None:
     """Everything the seeder is responsible for, asserted where it fails loudly."""
-    name = slug_skill_name(_skill(reading).name)
-    assert db.skills.get(name) is not None, f"the job's routine {name!r} must be registered"
-
     row = db.memories.get(_CONTAINER)
     assert row is not None, f"the job's container {_CONTAINER!r} must exist"
     assert row.notify, "these cases measure the notification, so the job must be notifying"
-    assert row.skill_name == name, f"the job must run the taught routine, not {row.skill_name!r}"
 
-    program = row.extraction_prompt or ""
-    parsed = tuple(call.tool for call in program_calls(program, frozenset(_PROGRAM_CALLS)))
-    assert parsed == _PROGRAM_CALLS, (
-        f"the stored program must read back as {list(_PROGRAM_CALLS)} under the rendered "
-        f"dialect, got {list(parsed)} — program: {program!r}"
+    prompt = row.extraction_prompt or ""
+    assert LISTING_URL in prompt, (
+        f"the prompt must name {LISTING_URL!r} — a cycle can only fetch the page "
+        f"something it reads names.  Prompt: {prompt!r}"
     )
-    assert LISTING_URL in program, (
-        f"the runtime join must fill the browse leaf with {LISTING_URL!r} — a cycle can only "
-        f"fetch the page something it reads names.  Program: {program!r}"
+    assert f"'{_CONTAINER}'" in prompt, (
+        f"the prompt must name its own destination, {_CONTAINER!r}.  Prompt: {prompt!r}"
     )
-    assert f"'{_CONTAINER}'" in program, (
-        f"the attachment must be bound to {_CONTAINER!r}.  Program: {program!r}"
-    )
-    assert _extract_slot(reading) in program, (
-        f"this arm's instruction must reach the model as {_extract_slot(reading)!r} — the "
-        f"extract description is the whole arm axis.  Program: {program!r}"
+    assert reading.extract in prompt, (
+        f"this arm's instruction must reach the model as {reading.extract!r} — the "
+        f"extract phrase is the whole arm axis.  Prompt: {prompt!r}"
     )
     _assert_the_entry_condition(db, case)
 
@@ -1108,28 +1002,6 @@ def _holds_the_moved_price_only(sample: SampleObservation, _world: World) -> Ans
     )
 
 
-def _closed_having_worked(sample: SampleObservation, _world: World) -> Answer:
-    """The run's own determination: it completed and it CHANGED something.
-
-    A record field, read literally off ``promptlog.run_outcome`` — ``worked`` is defined as
-    "completed and changed something", which is what "the cycle wrote" means without reading a
-    tool name.  ``no_work`` is a clean close that changed nothing and ``failed`` is a bail, and
-    both are the wrong end state here."""
-    closed = sample.run_outcome or "—"
-    detail = f" — {sample.run_reason}" if sample.run_reason else ""
-    return sample.run_outcome == RunOutcome.WORKED.value, f"the run closed {closed}{detail}"
-
-
-def _stopped_on_the_unchanged_value(sample: SampleObservation, _world: World) -> Answer:
-    """The run stopped at the write chokepoint, on the reason the shipped table names.
-
-    This is what makes silence STRUCTURAL rather than a judgement the model makes each cycle:
-    the gate compares the candidate against the stored value and raises its STOP on the very
-    call that would otherwise complete the program, so the notification the framework would
-    have entered is never entered at all."""
-    return sample.run_reason == _STOP_REASON, f"the run closed {sample.run_reason or '—'}"
-
-
 def _told_once(sample: SampleObservation, _world: World) -> Answer:
     """The user was told, and told once.
 
@@ -1179,18 +1051,12 @@ async def test_the_watch_writes_the_first_reading(
         min_pass_rate=None,  # report-only until the numbers are read with the code owner
         family=_FAMILY,
     )
-    # LANDED — nothing; see the module docstring.  A collector moves no conversation machine,
-    # and the run record's fields are STORE claims below rather than a category borrowed.
-
     # STORE
     cohort.claim("state: the collection holds one entry", _one_entry, SpecCategory.STORE)
     cohort.claim(
         f"state: the entry it holds carries {_BASELINE_AMOUNT}",
         _holds(_BASELINE_AMOUNT),
         SpecCategory.STORE,
-    )
-    cohort.claim(
-        "state: the run closed having changed something", _closed_having_worked, SpecCategory.STORE
     )
     cohort.claim("state: the user was told once", _told_once, SpecCategory.STORE)
 
@@ -1224,18 +1090,12 @@ async def test_the_watch_stays_quiet_when_the_reading_has_not_moved(
         min_pass_rate=None,  # report-only until the numbers are read with the code owner
         family=_FAMILY,
     )
-    # LANDED — nothing; see the module docstring.
 
     # STORE
     cohort.claim("state: the collection still holds one entry", _one_entry, SpecCategory.STORE)
     cohort.claim(
         f"state: the entry it holds still carries {_BASELINE_AMOUNT}",
         _holds(_BASELINE_AMOUNT),
-        SpecCategory.STORE,
-    )
-    cohort.claim(
-        "state: the run stopped on the value being unchanged",
-        _stopped_on_the_unchanged_value,
         SpecCategory.STORE,
     )
     cohort.claim("state: nothing reached the send queue", _told_nothing, SpecCategory.STORE)
@@ -1266,7 +1126,6 @@ async def test_the_watch_writes_and_tells_when_the_reading_moves(
         min_pass_rate=None,  # report-only until the numbers are read with the code owner
         family=_FAMILY,
     )
-    # LANDED — nothing; see the module docstring.
 
     # STORE
     cohort.claim(
@@ -1276,9 +1135,6 @@ async def test_the_watch_writes_and_tells_when_the_reading_moves(
     )
     cohort.claim(
         "state: the collection still holds one entry, rewritten", _one_entry, SpecCategory.STORE
-    )
-    cohort.claim(
-        "state: the run closed having changed something", _closed_having_worked, SpecCategory.STORE
     )
     cohort.claim("state: the user was told once", _told_once, SpecCategory.STORE)
 
@@ -1310,7 +1166,6 @@ async def test_the_watch_tells_the_asking_price_from_other_prices_on_the_same_li
         min_pass_rate=None,  # report-only until the numbers are read with the code owner
         family=_FAMILY,
     )
-    # LANDED — nothing; see the module docstring.
 
     # STORE
     cohort.claim(
@@ -1320,9 +1175,6 @@ async def test_the_watch_tells_the_asking_price_from_other_prices_on_the_same_li
     )
     cohort.claim(
         "state: the collection still holds one entry, rewritten", _one_entry, SpecCategory.STORE
-    )
-    cohort.claim(
-        "state: the run closed having changed something", _closed_having_worked, SpecCategory.STORE
     )
     cohort.claim("state: the user was told once", _told_once, SpecCategory.STORE)
     cohort.claim(

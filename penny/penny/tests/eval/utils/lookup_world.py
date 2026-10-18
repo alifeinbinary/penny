@@ -1,171 +1,81 @@
-"""The seeding machinery six lookup cases share (#2293): a routine taught but never
-run as a job, an old passing mention outside the conversation window, many lists,
-one archived with entries, one long list, and a standing job's own run history.
+"""The seeding machinery six lookup cases share (#2293): an archived job's own prompt,
+an old passing mention outside the conversation window, many lists, one archived with
+entries, one long list, and a standing job's own run history.
 
 Nothing here is a case.  Each piece is built once, here, because two of the six
 cases would otherwise carry a second copy of the same construction free to drift —
-the taught-routine pipeline in particular is the production path (``distill_steps``
-+ the run-end labeller + the framer's signature), not a hand-written shortcut, so a
-routine read back by this suite has the same shape a real demonstration leaves.
+the job-seeding machinery in particular reads from ``penny.tests.eval.end_to_end.world``
+and ``test_standing_collection.py``, so a job read back by this suite has the same
+production shape a real apply turn and a real collector cycle leave behind.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Any, NamedTuple
-
-from sqlalchemy import update
-from sqlmodel import col
+from typing import NamedTuple
 
 from penny.constants import PennyConstants, RunOutcome
 from penny.database import Database
 from penny.database.memory import EntryInput
-from penny.database.models import MemoryEntry, PromptLog
-from penny.database.skills import (
-    DistillInput,
-    SkillDraft,
-    SkillStep,
-    distill_steps,
-    slug_skill_name,
-)
-from penny.skill_extraction import _apply_leaf_labels, _interface_parameters
 from penny.tests.conftest import TEST_SENDER, require_memory
-from penny.tests.eval.chat.idle.test_standing_collection import WATCH_ROUTINE, StandingJob
+from penny.tests.eval.chat.idle.test_standing_collection import (
+    DEMONSTRATED_PAGE,
+    DEMONSTRATED_WATCH,
+    StandingJob,
+    seed_standing_jobs,
+)
 from penny.tests.eval.conftest import Seeder, seeded_run_id
+from penny.tests.eval.end_to_end.world import _wire_tool_call, seed_job_cycle, seed_known_routine
 from penny.tests.eval.utils.fixtures import SynthCollection
-from penny.tests.eval.utils.transition_ledger import _seeded_response, _wire_tool_call
-from penny.tools.micro_context import FramedParameter, LeafLabel, SkillLabels, SkillSignature
 
 FAMILY = "lookups"
 
 _INCOMING = PennyConstants.MessageDirection.INCOMING
 _OUTGOING = PennyConstants.MessageDirection.OUTGOING
 _PENNY = PennyConstants.MessageAuthor.PENNY
-_COLLECTOR = PennyConstants.MessageAuthor.COLLECTOR
 
 
-# ── Case 1: a routine taught but never run as a job ──────────────────────────
+# ── Case 1: a routine's steps, read off a job that is not running ────────────
 #
-# Built through the SAME production pipeline ``WATCH_ROUTINE`` is (distillation over a
-# fabricated demonstration, then the run-end labeller, then the framer's signature) —
-# never hand-written steps — so its shape is a browse, then a `collection_write` whose
-# destination is the placeholder a taught routine carries, exactly like a real one.
-# Unlike `WATCH_ROUTINE`, it is seeded as a bare skill ROW and never applied to any
-# collection: `chat_eval(seed_skills=...)` writes it straight into the registry.
+# #2519's design note (naive baseline): "a routine's steps" is the running OR ARCHIVED
+# job's own prompt — there is no skill registry left to hold a routine unattached from any
+# job, so the closest naive shape to "taught but never run" is a job that WAS running and
+# is now archived.  Seeded both ways at once through ``seed_known_routine`` (the job
+# already running, holding its entry, AND the earlier conversation that set it up — her
+# own ask/read/write/configure/reply, in her logs), then archived — so "not running as any
+# job" stays literally true, the way it was on main.
 
 HARBOUR_PAGE = "https://camberwick.example/harbour-flag"
 HARBOUR_WATCH = "whether the storm pennant is flying"
-HARBOUR_PAGE_DESC = "the camberwick harbour page to check each run"
-HARBOUR_WATCH_DESC = "whether the storm pennant is flying"
 HARBOUR_DESTINATION = "harbour-flag-checks"
 HARBOUR_ENTRY_KEY = "Oct 12 check"
 HARBOUR_ENTRY_VALUE = f"{HARBOUR_ENTRY_KEY} — the storm pennant was flying at midday."
+HARBOUR_ASK = "can you keep an eye on the camberwick harbour flag for me?"
+HARBOUR_REPLY = "done — I'll check whether the storm pennant is flying and let you know."
 
-# The two words the recipe can carry, each only through a leaf's LABEL — the literal
-# demonstrated page and watch phrase never render for an unattached skill (every leaf of
-# a distilled routine is a binding or a parameter; a parameter with nothing bound renders
-# its own description, never the value it was taught with).  So the anchor lives in the
-# description text itself, which is what both `find`'s recipe block and the ambient
-# "needs:" line carry.
+# The two words the job's own prompt carries verbatim — ``seed_known_routine`` writes a
+# plain ``f"Check {url} for {extract} and save it."`` straight into ``extraction_prompt``,
+# so both anchors land in the one place a "what does it do" read has to reach.
 HARBOUR_PAGE_WORD = "camberwick"
 HARBOUR_WATCH_WORD = "pennant"
 
 
-class _Demonstration(NamedTuple):
-    url: str
-    extract: str
-    collection: str
-    entry_key: str
-    entry_value: str
-
-
-def _demonstrated_ledger(demo: _Demonstration) -> list[DistillInput]:
-    """The two certified steps distillation reads, with their results carrying the
-    real ``(<tool> result)`` frame — the same shape ``WATCH_ROUTINE``'s own
-    demonstration uses, so the write's content binds to the browse's PAYLOAD."""
-    return [
-        DistillInput(
-            source_ordinal=1,
-            tool="browse",
-            arguments={"queries": [demo.url], "extract": demo.extract},
-            result=f"You opened {demo.url} (browse result)\n{demo.entry_value}",
-        ),
-        DistillInput(
-            source_ordinal=2,
-            tool="collection_write",
-            arguments={
-                "collection": demo.collection,
-                "entries": [{"key": demo.entry_key, "content": demo.entry_value}],
-            },
-            result=(
-                f"You saved an entry to {demo.collection}: "
-                "(collection_write result)\nWrote 1 entry."
-            ),
-        ),
-    ]
-
-
-def _labels_by_value(steps: list[SkillStep], authored: dict[str, LeafLabel]) -> SkillLabels:
-    """The labeller's draw, mapped from the demonstrated VALUES onto whichever
-    arg-derived spot names distillation happened to mint — the same map-home shape
-    ``WATCH_ROUTINE``'s own fixture uses, so a naming change inside distillation
-    cannot leave this silently unmapped."""
-    labels: dict[str, LeafLabel] = {}
-    for step in steps:
-        for substitution in step.substitutions:
-            if substitution.parameter is None:
-                continue
-            node: Any = step.arguments
-            for part in substitution.path:
-                node = node[part]
-            value = str(node)
-            if value in authored:
-                labels[substitution.parameter] = authored[value]
-    assert len(labels) == len(authored), (
-        f"every authored label must map home — matched {sorted(labels)} of {sorted(authored)}"
-    )
-    return SkillLabels(labels=labels)
-
-
-def _build_harbour_routine() -> SkillDraft:
-    """The one taught routine case 1 reads back: a browse of the harbour page, then a
-    write whose destination is never created — so the skill is a bare registry row,
-    never instantiated as any collection's job."""
-    demo = _Demonstration(
+def _seed_harbour_job(db: Database) -> None:
+    """Stand the harbour-flag job up as a routine Penny already knows (both halves:
+    the job and the earlier conversation that set it up), then archive it — the naive
+    shape of "a routine taught but never run as a job" (#2519)."""
+    seed_known_routine(
+        db,
+        collection=HARBOUR_DESTINATION,
+        description="the camberwick harbour flag",
         url=HARBOUR_PAGE,
         extract=HARBOUR_WATCH,
-        collection=HARBOUR_DESTINATION,
         entry_key=HARBOUR_ENTRY_KEY,
         entry_value=HARBOUR_ENTRY_VALUE,
+        schedule="FREQ=DAILY;BYHOUR=7",
+        ask=HARBOUR_ASK,
+        reply=HARBOUR_REPLY,
     )
-    steps, parameters = distill_steps(_demonstrated_ledger(demo), frozenset({demo.collection}))
-    authored = {
-        demo.url: LeafLabel(name="page", description=HARBOUR_PAGE_DESC),
-        demo.extract: LeafLabel(name="watched_for", description=HARBOUR_WATCH_DESC),
-        demo.collection: LeafLabel(
-            name="destination", description="the collection this is set up on"
-        ),
-    }
-    steps, distilled = _apply_leaf_labels(steps, parameters, _labels_by_value(steps, authored))
-    signature = SkillSignature(
-        name="check_harbour_flag",
-        description="Check a harbour's current flag status and keep what was found.",
-        parameters=(
-            FramedParameter(name="page", description=HARBOUR_PAGE_DESC, value=demo.url),
-            FramedParameter(name="watched_for", description=HARBOUR_WATCH_DESC, value=demo.extract),
-        ),
-    )
-    return SkillDraft(
-        name=signature.name,
-        intent=signature.description,
-        description=signature.description,
-        steps=steps,
-        parameters=_interface_parameters(signature, distilled),
-        source_run_id=seeded_run_id("taught-the-harbour-routine"),
-    )
-
-
-HARBOUR_ROUTINE = _build_harbour_routine()
+    db.memories.archive(HARBOUR_DESTINATION, run_id=seeded_run_id(f"archive-{HARBOUR_DESTINATION}"))
 
 
 # ── Case 2: an old passing mention, out of the conversation window ───────────
@@ -385,26 +295,14 @@ def seed_long_recipe_list(db: Database) -> None:
 
 # ── Case 6: a standing job's own run history ──────────────────────────────────
 #
-# Reuses the public WATCH_ROUTINE with the SAME demonstrated values the house's
-# typewriter watch uses (read off its own parameters, never a private constant), per
-# the code owner's amendment, so this is the same watch rather than a lookalike.
-
-
-def _demonstrated_value(name: str) -> str:
-    """The value WATCH_ROUTINE's own framing demonstrated a named parameter with —
-    never None in practice (the routine was minted with a real demonstration), but
-    the field is optional on the type, so this is where that is asserted once."""
-    value = next(p.value for p in WATCH_ROUTINE.parameters if p.name == name)
-    assert value is not None, f"WATCH_ROUTINE carries no demonstrated value for {name!r}"
-    return value
-
-
-_PAGE_VALUE = _demonstrated_value("page")
-_WATCHED_VALUE = _demonstrated_value("watched_for")
+# Reuses the house's own typewriter watch's page/watched-for values (``DEMONSTRATED_PAGE``/
+# ``DEMONSTRATED_WATCH``, exported from ``test_standing_collection.py`` for exactly this
+# reuse), so this is the same watch rather than a lookalike.
 
 TYPEWRITER_WATCH = StandingJob(
-    routine=WATCH_ROUTINE,
-    values={"page": _PAGE_VALUE, "watched_for": _WATCHED_VALUE},
+    container="typewriter-watch-history",
+    url=DEMONSTRATED_PAGE,
+    watched_for=DEMONSTRATED_WATCH,
     description="Portable typewriters newly listed at the Quill Market shop.",
     schedule="FREQ=DAILY;BYHOUR=7",
     notify=True,
@@ -428,81 +326,40 @@ _LATEST_RUN = _RunSeed("typewriter-watch-latest", "Olympia SM3", LATEST_FIND, 1)
 
 def seed_job_with_run_history(db: Database) -> None:
     """Stand the job up, then two completed cycles behind it: an earlier find and a
-    later one, each cited by its own run.  Every run's prompt rows are stamped to a
-    FIXED PAST instant rather than the moment the sample seeds them — a run seeded
-    the ordinary way would land at the same instant the turn starts, which is not
-    "last time" for anything.  The backdating is a raw update because no public
-    store method takes an explicit timestamp for a logged run."""
-    job = TYPEWRITER_WATCH
-    stood_up = seeded_run_id("stood-up-typewriter-watch")
-    db.memories.create_collection(job.container, job.description, created_by_run_id=stood_up)
-    db.memories.update_collection_metadata(
-        job.container,
-        extraction_prompt=job.program,
-        schedule=job.schedule,
-        replace_schedule=True,
-        notify=job.notify,
-        skill_name=slug_skill_name(job.routine.name),
-        skill_params=job.values,
-        run_id=stood_up,
-    )
+    later one, each cited by its own run and backdated to a FIXED PAST instant — a run
+    seeded the ordinary way would land at the same instant the turn starts, which is not
+    "last time" for anything."""
+    seed_standing_jobs(TYPEWRITER_WATCH)(db)
     for run_seed in (_EARLIER_RUN, _LATEST_RUN):
-        _seed_one_run(db, job.container, run_seed)
+        _seed_one_run(db, TYPEWRITER_WATCH, run_seed)
 
 
-def _seed_one_run(db: Database, container: str, run_seed: _RunSeed) -> None:
+def _seed_one_run(db: Database, job: StandingJob, run_seed: _RunSeed) -> None:
+    """One completed cycle: a browse of the job's page, a write of what it found, a
+    close — built with ``_wire_tool_call``, the same wire shape ``seed_known_routine``'s
+    own turns use — then seeded through ``seed_job_cycle``, backdated to ``days_ago``."""
     run_id = seeded_run_id(run_seed.run_name)
-    page, watched_for = TYPEWRITER_WATCH.values["page"], TYPEWRITER_WATCH.values["watched_for"]
-    steps = [
-        DistillInput(
-            source_ordinal=1,
-            tool="browse",
-            arguments={"queries": [page], "extract": watched_for},
-            result=f"You opened {page} (browse result)\n{watched_for}: {run_seed.entry_value}",
+    calls = [
+        _wire_tool_call(
+            f"{run_id}-0", "browse", {"queries": [job.url], "extract": job.watched_for}
         ),
-        DistillInput(
-            source_ordinal=2,
-            tool="collection_write",
-            arguments={
-                "collection": container,
+        _wire_tool_call(
+            f"{run_id}-1",
+            "collection_write",
+            {
+                "collection": job.container,
                 "entries": [{"key": run_seed.entry_key, "content": run_seed.entry_value}],
             },
-            result=f"You saved an entry to {container}: (collection_write result)\nWrote 1 entry.",
         ),
+        _wire_tool_call(f"{run_id}-2", PennyConstants.DONE_TOOL_NAME, {}),
     ]
-    calls = [_wire_tool_call(f"{run_id}-{index}", step) for index, step in enumerate(steps)]
-    db.messages.log_prompt(
-        model="seed",
-        messages=[],
-        response=_seeded_response(tool_calls=calls),
-        agent_name=_COLLECTOR,
-        run_id=run_id,
-        run_target=container,
+    seed_job_cycle(
+        db,
+        container=job.container,
+        run_name=run_seed.run_name,
+        calls=calls,
+        outcome=RunOutcome.WORKED,
+        summary=f"Recorded {run_seed.entry_key}.",
+        wrote=(run_seed.entry_key, run_seed.entry_value),
+        days_ago=run_seed.days_ago,
     )
-    db.messages.set_run_outcome(run_id, RunOutcome.WORKED.value, f"Recorded {run_seed.entry_key}.")
-    require_memory(db, container).write(
-        [EntryInput(key=run_seed.entry_key, content=run_seed.entry_value)],
-        author=_COLLECTOR,
-        run_id=run_id,
-    )
-    _backdate_run(db, run_id, run_seed.days_ago)
-
-
-def _backdate_run(db: Database, run_id: str, days_ago: int) -> None:
-    """Push one run's prompt rows (and the entry it wrote) back by ``days_ago`` —
-    true of the seeded world, not of anything the model did.
-
-    Written through the models, so the stamp lands in the form every other row's
-    has: a stamp bound as ISO text keeps its offset, and the state header cannot
-    order such a row against the rest."""
-    stamp = db.clock.now() - timedelta(days=days_ago)
-    with db.get_session() as session:
-        session.exec(
-            update(PromptLog).where(col(PromptLog.run_id) == run_id).values(timestamp=stamp)
-        )
-        session.exec(
-            update(MemoryEntry)
-            .where(col(MemoryEntry.last_written_by_run_id) == run_id)
-            .values(created_at=stamp)
-        )
-        session.commit()

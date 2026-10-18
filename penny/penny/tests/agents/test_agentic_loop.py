@@ -66,7 +66,6 @@ from penny.validation.response_validators import (
     HallucinatedToolCallRepair,
     HallucinatedUrlValidator,
     RefusalValidator,
-    SkillNarrationValidator,
     XmlTagValidator,
     find_hallucinated_urls,
 )
@@ -3622,15 +3621,13 @@ class TestResponseValidators:
         # text is a legitimate answer there).
         assert Agent.run_shape_validators == []
         assert Agent.invalid_draw_conditions == ()
-        # Chat's run-shape chain is down to ONE narrate-from-the-RECORD nudge — what the run
-        # LEARNED (#1658) — and its invalid draws are the ones that are not a reply, so a
-        # plain conversational reply stays valid.  Its former siblings, what the run SET
-        # RUNNING (#1869) and what it WROTE (#1946), are gone (#2473): both records exist
-        # the moment their tool call lands, so `ChatAgent.after_tool_step` appends each
-        # straight onto that step's own tool result instead.
-        assert [v.__class__ for v in ChatAgent.run_shape_validators] == [
-            SkillNarrationValidator,
-        ]
+        # Chat's run-shape chain is EMPTY (#2455 naive baseline / #2473): what the run
+        # WROTE is delivered straight onto the tool result the moment its call lands
+        # (`ChatAgent.after_tool_step`), and there is no skill/round-framing machinery
+        # left to narrate — so no text-branch guard is left to chain.  Its invalid draws
+        # are still the ones that are not a reply, so a plain conversational reply stays
+        # valid.
+        assert ChatAgent.run_shape_validators == []
         assert [condition for condition, _ in ChatAgent.invalid_draw_conditions] == [
             ConditionKey.CALL_AS_TEXT,
             ConditionKey.CALL_FRAGMENT_REPLY,

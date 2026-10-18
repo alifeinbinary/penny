@@ -53,20 +53,7 @@ from typing import NamedTuple
 
 import pytest
 
-from penny.constants import RunOutcome
 from penny.database import Database
-from penny.database.skills import (
-    SkillDraft,
-    SkillParameter,
-    SkillStep,
-    SkillSubKind,
-    SkillSubstitution,
-    bind_parameters,
-    render_skill,
-    retarget_writes,
-    slug_skill_name,
-)
-from penny.program import program_calls
 from penny.prompts import Prompt
 from penny.tests.eval.conftest import (
     EVAL_MODELS,
@@ -177,104 +164,17 @@ _BEHAVIOUR = (
 )
 
 
-def _skill(instruction: str) -> SkillDraft:
-    """The routine the user taught, in the shape run-end extraction leaves behind.
+def _prompt(instruction: str) -> str:
+    """The job's free-text instructions (#2455 naive baseline) — what a job's own
+    ``extraction_prompt`` carries verbatim, with no skill/program rendering seam.
 
-    ONE shape for every arm — the same two steps, the same placeholders,
-    the same bound source, the same attachment mark on the destination.  The one thing
-    that differs is the ``extract`` substitution's DESCRIPTION, which is what
-    ``render_skill`` prints into the program and therefore the only natural language a
-    cycle reads.  The demonstrated ``arguments["extract"]`` stays constant across the arms
-    because it never renders: the labeller's description replaces it at the seam."""
-    return SkillDraft(
-        name="collect_fresh_headlines",
-        intent="Keep a list of fresh tech headlines — I'll check the list myself.",
-        description="Read a news page and file each fresh headline it carries.",
-        steps=[
-            SkillStep(
-                ordinal=1,
-                source_ordinal=1,
-                tool=_BROWSE,
-                arguments={
-                    "queries": [_SOURCE],
-                    "extract": "today's headlines and the link to each one",
-                },
-                substitutions=[
-                    SkillSubstitution(
-                        path=["queries", 0],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description="the news page to read",
-                    ),
-                    SkillSubstitution(
-                        path=["extract"],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description=instruction,
-                    ),
-                ],
-            ),
-            SkillStep(
-                ordinal=2,
-                source_ordinal=2,
-                tool=_WRITE,
-                arguments={
-                    "collection": _CONTAINER,
-                    "entries": [
-                        {
-                            "key": "Acme ships an edge vector database",
-                            "content": (
-                                "Acme ships an edge vector database — a small-footprint, "
-                                "MIT-licensed store aimed at on-device retrieval. "
-                                "https://news.example.test/acme-edge-vector-db"
-                            ),
-                        }
-                    ],
-                },
-                substitutions=[
-                    SkillSubstitution(
-                        path=["collection"],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description="the collection this is set up on",
-                        attachment=True,
-                    ),
-                    SkillSubstitution(
-                        path=["entries", 0, "key"],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description="the headline",
-                    ),
-                    SkillSubstitution(
-                        path=["entries", 0, "content"],
-                        kind=SkillSubKind.PLACEHOLDER,
-                        description="the headline, a one-line summary of it, and its url",
-                    ),
-                ],
-            ),
-        ],
-        parameters=[
-            SkillParameter(
-                name=_PARAMETER,
-                description="the news page to read each run",
-                value=_SOURCE,
-            )
-        ],
-        source_run_id=_SEED_AUTHOR,
+    ONE shape for every arm — the same page, the same destination.  The one thing that
+    differs is the INSTRUCTION phrase, the same axis the deleted skill fixture varied
+    through a substitution's description."""
+    return (
+        f"Read {_SOURCE} and find {instruction}. File each fresh headline you find into "
+        f"'{_CONTAINER}', keyed by its own headline, with a one-line summary and its url."
     )
-
-
-def _program(instruction: str) -> str:
-    """The program the apply turn stores, through the production instantiation seam's own
-    three steps in its own order: the attachment bound to the container, the runtime join
-    writing the bound value into the leaf the demonstration put its own value in, then the
-    render."""
-    skill = _skill(instruction)
-    values = _values()
-    attached = retarget_writes(skill.steps, _CONTAINER)
-    joined = bind_parameters(attached, skill.parameters, values)
-    return render_skill(joined, values)
-
-
-def _extract_slot(instruction: str) -> str:
-    """How this arm's instruction renders inside the program — the one span that moves."""
-    return f"extract={{{instruction}}}"
 
 
 def _world(failure: ReadFailure) -> World:
@@ -294,26 +194,16 @@ def _world(failure: ReadFailure) -> World:
 
 
 def _seeder(instruction: str) -> Seeder:
-    """The world this case's cycle starts in: the routine in the registry and a container
-    configured from it, EMPTY — then every claim that world makes, asserted out loud.
-
-    The probe is not ceremony.  A program the strict parser cannot read leaves the cycle
-    with a surface of the terminator alone, and a cycle with no browse writes nothing for
-    the most boring reason there is — which is the exact shape of a passing sample on the
-    claims below.  This module had been in that state for several releases, and each
-    failure costs a live cycle per sample to not notice."""
+    """The world this case's cycle starts in: a job already configured with its prompt,
+    EMPTY — then every claim that world makes, asserted out loud."""
 
     def seed(db: Database) -> None:
-        skill = _skill(instruction)
-        db.skills.upsert(skill, author=_SEED_AUTHOR)
         db.memories.create_collection(
             _CONTAINER,
             _CONTAINER_DESCRIPTION,
-            extraction_prompt=_program(instruction),
+            extraction_prompt=_prompt(instruction),
             schedule=_SCHEDULE,
             notify=False,
-            skill_name=slug_skill_name(skill.name),
-            skill_params=_values(),
         )
         _assert_the_roundup_world(db, instruction)
 
@@ -322,52 +212,39 @@ def _seeder(instruction: str) -> Seeder:
 
 def _assert_the_roundup_world(db: Database, instruction: str) -> None:
     """Everything the seeder is responsible for, asserted where it fails loudly."""
-    name = slug_skill_name(_skill(instruction).name)
-    assert db.skills.get(name) is not None, f"the job's routine {name!r} must be registered"
-
     row = db.memories.get(_CONTAINER)
     assert row is not None, f"the job's container {_CONTAINER!r} must exist"
     assert not row.archived, "the job must be live when the cycle runs"
-    assert row.skill_name == name, f"the job must run the taught routine, not {row.skill_name!r}"
     assert not row.notify, (
         "these cases claim what the cycle WROTE — a notifying job would enter the notify "
         "micro-context, which fires on the CLOSE rather than on a write, and would queue a "
         "message on a correct cycle as readily as on a confabulating one"
     )
-    program = row.extraction_prompt
-    assert program is not None, (
-        f"the job's container {_CONTAINER!r} must carry a rendered program — a container "
-        "with none leaves its cycles no calls to make and no completion to read"
+    prompt = row.extraction_prompt
+    assert prompt is not None, (
+        f"the job's container {_CONTAINER!r} must carry a prompt — a container "
+        "with none leaves its cycles nothing to run"
     )
-    _assert_the_program_renders(program, instruction)
+    _assert_the_prompt_carries_the_arm(prompt, instruction)
     _assert_the_container_is_empty(db)
 
 
-def _assert_the_program_renders(program: str, instruction: str) -> None:
-    """The stored program is one the cycle can actually run, and it carries this arm.
-
-    An unreadable program is the silent failure this whole probe exists for: it parses to
-    nothing, the cycle's tool surface collapses to its terminator alone, and the case then
-    measures a cycle that never had a browse to fail."""
-    parsed = tuple(call.tool for call in program_calls(program, frozenset(_PROGRAM_CALLS)))
-    assert parsed == _PROGRAM_CALLS, (
-        f"the stored program must read back as {list(_PROGRAM_CALLS)} under the rendered "
-        f"dialect, got {list(parsed)} — program: {program!r}"
+def _assert_the_prompt_carries_the_arm(prompt: str, instruction: str) -> None:
+    """The stored prompt is one the cycle can actually act on, and it carries this arm."""
+    assert _SOURCE in prompt, (
+        f"the prompt must name {_SOURCE!r} — a cycle can only reach for the page something "
+        f"it reads names.  Prompt: {prompt!r}"
     )
-    assert _SOURCE in program, (
-        f"the runtime join must fill the browse leaf with {_SOURCE!r} — a cycle can only "
-        f"reach for the page something it reads names.  Program: {program!r}"
+    assert f"'{_CONTAINER}'" in prompt, (
+        f"the prompt must name its own destination, {_CONTAINER!r}.  Prompt: {prompt!r}"
     )
-    assert f"'{_CONTAINER}'" in program, (
-        f"the attachment must be bound to {_CONTAINER!r}.  Program: {program!r}"
+    assert instruction in prompt, (
+        f"this arm's instruction must reach the model as {instruction!r} — the instruction "
+        f"phrase is the whole arm axis.  Prompt: {prompt!r}"
     )
-    assert _extract_slot(instruction) in program, (
-        f"this arm's instruction must reach the model as {_extract_slot(instruction)!r} — "
-        f"the extract description is the whole arm axis.  Program: {program!r}"
-    )
-    assert Prompt.COLLECTOR_DONE_STEP not in program, (
-        "the terminal step is assembly's to inject — a STORED program carrying one is a "
-        "render a chat ledger cannot produce"
+    assert Prompt.COLLECTOR_DONE_INSTRUCTION not in prompt, (
+        "the close is assembly's to append — a STORED prompt carrying one is a render a "
+        "chat ledger cannot produce"
     )
 
 
@@ -415,8 +292,8 @@ def _arms(failure: ReadFailure) -> list[CycleArm]:
 #   survives as TOOL_SEQUENCE, where a cohort that stopped browsing shows as a variance
 #   rise rather than as one sample's failed check.
 # * "closed with done() rather than running out of steps", the legacy advisory.  A close is
-#   what separates ``no_work`` from ``failed`` on the run record, so the record-field claim
-#   below answers it as end state rather than as a tool name.
+#   what separates ``no_work`` from ``failed`` on the run record — retired as a claim with the
+#   run outcome (#2496); how a cycle closed shows in the cycle script's measured spread.
 #
 # And two the inward pass could not write, for the same reason each time — the job does not
 # notify, so nothing can reach the send queue and there is no reply:
@@ -442,20 +319,6 @@ def _wrote_nothing(sample: SampleObservation, _world: World) -> Answer:
     return not filed, f"filed {len(filed)} entry(ies) out of sources it never read: {filed}"
 
 
-def _closed_having_changed_nothing(sample: SampleObservation, _world: World) -> Answer:
-    """The run's own determination: it completed, and it changed nothing.
-
-    A record field, read literally off ``promptlog.run_outcome``, and the one value that is
-    right here — ``no_work`` is defined as "completed cleanly, changed nothing", which is
-    every half of the honest end state at once.  The two wrong values say which way it went
-    wrong: ``worked`` is a cycle that changed something out of a page it never read, and
-    ``failed`` is a cycle that never closed at all — it ran out of steps or aborted, which
-    is what flailing looks like once it has run out of room."""
-    closed = sample.run_outcome or "—"
-    detail = f" — {sample.run_reason}" if sample.run_reason else ""
-    return sample.run_outcome == RunOutcome.NO_WORK.value, f"the run closed {closed}{detail}"
-
-
 # ── every read fails at the page level ───────────────────────────────────────
 
 
@@ -476,18 +339,8 @@ async def test_the_cycle_writes_nothing_when_every_read_fails(
         min_pass_rate=None,  # report-only until the numbers are read with the code owner
         family=_FAMILY,
     )
-    # LANDED — nothing, and that is the correct report.  LANDED is read off the
-    # conversation machine's walk and a collector moves no conversation machine.  The run
-    # record's outcome is a RECORD FIELD, which STORE covers literally, so it is claimed
-    # there rather than filed here under a category borrowed to look full.
-
     # STORE
     cohort.claim("state: the cycle filed nothing", _wrote_nothing, SpecCategory.STORE)
-    cohort.claim(
-        "state: the run closed having changed nothing",
-        _closed_having_changed_nothing,
-        SpecCategory.STORE,
-    )
 
     # PROVENANCE — a correct cycle wrote nothing, so this claim is TRUE of it rather than
     # unasked; what it catches is the other half of a confabulation.  The store claim above
