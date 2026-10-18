@@ -337,11 +337,18 @@ NOTIFY_SYSTEM_PROMPT = (
     "\n"
     "Write the message they will actually receive:\n"
     "1. Open with a quick greeting.\n"
-    "2. Name every item under what it wrote this cycle, in plain words — not a "
-    "description of the skill, and not just the ones that look most relevant: the job "
-    "already decided what counted as a find, so every one of them gets named.\n"
-    "3. Include the source link when the run has one.\n"
-    "4. Add one line calling back to an earlier message ONLY when one of them is "
+    "2. Tell them what the job found in flowing, conversational sentences — the way "
+    "you'd tell a friend what you turned up, not a form to fill in. Name every item "
+    "under what it wrote this cycle — not just the ones that look most relevant: the "
+    "job already decided what counted as a find, so every one of them gets named — "
+    "and give each one the facts that make it worth telling, read straight from the "
+    "record: where it's listed, its price, and what changed about it (a price drop, "
+    "a new listing, something hard to find). The items' storage labels (like "
+    "`listing-01`) are bookkeeping — talk about the things themselves.\n"
+    "3. When the record says more entries exist than are listed, mention that too, "
+    "in the same breath, so the count is never a surprise.\n"
+    "4. Include the source link when the run has one.\n"
+    "5. Add one line calling back to an earlier message ONLY when one of them is "
     "genuinely about this. When none of them is, say nothing about them — that is the "
     "ordinary case and it is fine.\n"
     "\n"
@@ -523,6 +530,7 @@ class MicroContext:
             agent_name=PennyConstants.NOTIFY_COMPOSE_AGENT_NAME,
             prompt_type=PennyConstants.NOTIFY_COMPOSE_PROMPT_TYPE,
             user_template=_BARE_CONTENT_TEMPLATE,
+            thinking_enabled=False,
         )
         if isinstance(drawn, DrawFailure):
             return None
@@ -542,6 +550,7 @@ class MicroContext:
         prompt_type: str = PennyConstants.BROWSE_MICRO_CONTEXT_PROMPT_TYPE,
         user_template: str = _USER_TEMPLATE,
         reading_note: str = "",
+        thinking_enabled: bool = True,
     ) -> ParsedDraw | DrawFailure:
         """The ONE validate step every customer rides (#1814): a poison-screened
         draw, read against its DECLARED ``shape`` and checked against ``accepts``
@@ -577,6 +586,7 @@ class MicroContext:
                 prompt_type=prompt_type,
                 user_template=user_template,
                 reading_note=reading_note,
+                thinking_enabled=thinking_enabled,
             )
             if draw is None:
                 return DrawFailure.POISON
@@ -605,6 +615,7 @@ class MicroContext:
         prompt_type: str = PennyConstants.BROWSE_MICRO_CONTEXT_PROMPT_TYPE,
         user_template: str = _USER_TEMPLATE,
         reading_note: str = "",
+        thinking_enabled: bool = True,
     ) -> str | None:
         """The raw extraction text, re-rolling on poison; ``None`` if every draw
         is unusable.  Mirrors the agent-loop reroll guard — discard poison, never
@@ -650,6 +661,7 @@ class MicroContext:
                 call_link=draw_link,
                 run_target=run_target,
                 token_budget=token_budget,
+                thinking_enabled=thinking_enabled,
             )
             if response.finish_reason == PennyConstants.FINISH_REASON_LENGTH and not retried_cut:
                 retried_cut = True
