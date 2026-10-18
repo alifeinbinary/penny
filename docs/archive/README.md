@@ -106,7 +106,7 @@ and — where it has one — the PR that retired it and what took its place. Old
 
 ## 2026-07-13 — Conversation machine & skills
 
-- [`conversation-machine.md`](conversation-machine.md) — the conversation state
+- [`conversation-machine.md`](2026-10-conversation-machine-and-skills/docs/reference/conversation-machine.md) — the conversation state
   machine's reference (idle · elicit · learn · request · apply): the model filled
   states from an edge table rather than choosing a path directly, and a demonstrated
   tool sequence was framed, bound, and named as a replayable **skill**. The skills

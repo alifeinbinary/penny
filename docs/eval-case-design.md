@@ -161,8 +161,9 @@ A stored recipe with an invented `2 tbsp` used to read as sourced, because a rea
 *when* something happened: `2026-10-02`, `October 2` and `20:11` are sourced by a stamp that says
 so, and the day of a date sources no quantity. The line between a result's payload and its frame is
 the one `Tool.format_result` draws for every tool, so nothing here knows a tool's name. A figure
-only a system prompt states is not sourced: a job's terms reach content through the classifier's
-document, which lists every running job with its schedule, and through any read that returns them.
+only a system prompt states is not sourced: a job's terms reach content through the self-state
+header's Jobs section, which lists every running job with its schedule, and through any read
+that returns them.
 
 **A sample is hermetic** — its own database, its own conversation, its own pages — and every claim
 resolves against the world *that sample* was given. A model that ignores the page and emits a
@@ -273,9 +274,9 @@ asked for, and the wrong one on a page carrying none of it — the same value, c
 world and false against another. If a case cannot say which of its declared facts makes its
 expectation right, it is asserting a habit.
 
-**Do not claim what production already validates.** A span the binder checked with
-`_is_a_spoken_span`, a class the classifier validated against its own membership and re-rolled until
-it matched — a claim over either runs 15/15 by construction and measures the validator rather than
+**Do not claim what production already validates.** A value the browse extractor checked
+against its own tagged-line shape, or a draw the degeneracy guard re-rolled until it matched —
+a claim over either runs 15/15 by construction and measures the validator rather than
 the behaviour. Where an obvious-looking claim is missing for this reason, **say so in the case**, so
 a thin assertion set reads as *closed upstream* rather than as a checklist nobody ran.
 
@@ -534,23 +535,22 @@ condition does it.
 
 **Every case states the behaviour it checks**, in one sentence, in the fixed form
 **In \<the locus\>, when \<X\>, Penny \<does Y\>.** The locus names where the behaviour happens
-by its **shipped agent name** — `browse-extract`, `state-classifier`, `skill-framer`, the chat
-agent, a price-watch collector — never a label invented for the report. It is `behaviour=` on the
+by its **shipped agent name** — `browse-extract`, the chat agent, a price-watch collector —
+never a label invented for the report. It is `behaviour=` on the
 driver call, required, and it renders in the case's report header above every
 number: a case id says which fixture ran, and a rate means nothing until a reader knows what was
 being asked.
 
 **Every case declares its area, and the edge it covers when it covers one.** `area=` is a member
-of the closed `Area` set (`utils/catalogue.py`) — the part of Penny the case is about. `edge=` is a
-`(from, to)` pair of `ConversationState`, for a case that moves the conversation machine along one
-edge of `OUT_EDGES`: a classifier case names the state it draws from and the state its claim says
-the draw lands in, and a whole-turn case names the move its turn makes. A case about anything else
-leaves `edge` out. The **layer** — classifier draw, whole turn, micro-context, collector cycle — is
+of the closed `Area` set (`utils/catalogue.py`) — the part of Penny the case is about. **There is
+no conversation machine any more** (#2455 naive baseline), so `edge=` and the `conversation
+machine` area are RETIRED, kept in `utils/catalogue.py` only for the few historical cases/fixtures
+that already named an edge they walked; no current case declares either. A whole-turn case names
+the move its turn makes. The **layer** — whole turn, micro-context, collector cycle — is
 not declared: it is the driver the case uses.
 
 **`docs/eval-catalogue.md` is the list of every case**, generated from those declarations: each
-area's cases with their behaviour sentence and first wording, and which cases cover each machine
-edge at the classifier-draw and whole-turn layers. It's generated **on demand** (`make
+area's cases with their behaviour sentence and first wording. It's generated **on demand** (`make
 catalogue`) and never committed, so adding, renaming or re-declaring a case touches no shared
 file (#2395); `make check` re-collects the same declarations and fails on a bad area, a bad
 edge, or a case sharing its id with another — never on staleness, since nothing is committed to
@@ -558,8 +558,8 @@ compare against. Collecting the cases calls no model: with `EVAL_CATALOGUE` set,
 records its case and skips before a sample is stood up.
 
 **A driver refuses a case it cannot drive as a cohort**, with an error naming the case, before a
-sample runs: one with no `behaviour`, one with no `area` or with an `edge` the machine does not
-have, one that names nothing to drive (`ask` for chat and the classifier, `arms` for a collector,
+sample runs: one with no `behaviour`, one with no `area` or with an `edge` the retired machine
+does not have, one that names nothing to drive (`ask` for chat, `arms` for a collector,
 the instruction, utterance or turns for a microcontext), and one that leaves `min_pass_rate`
 unstated or states a floor. No driver takes a per-sample scorer: the body's claims against the
 returned cohort are the only way a case is graded.
@@ -582,14 +582,14 @@ site. It decides how the feature is *read*, not whether it is measured:
 
 | class | means | features | what it makes a divergence |
 |---|---|---|---|
-| **consequential** (the default) | a divergence implies a different end state | tool sequence, routine shape, entries stored, transitions, cycle script | a finding about **that sample** — worth looking at on its own |
-| **cosmetic** | a divergence is a different word for the same outcome | routine name, reply text | a finding about the **system** — measured and reported, never a fact about one sample |
+| **consequential** (the default) | a divergence implies a different end state | tool sequence, entries stored, transitions, cycle script, job terms | a finding about **that sample** — worth looking at on its own |
+| **cosmetic** | a divergence is a different word for the same outcome | turns sent, reply text | a finding about the **system** — measured and reported, never a fact about one sample |
 
 A feature not in that table is classified by the question, not by the list: **does a divergence here
 imply a different end state?** Getting it wrong is not cosmetic in either direction. File a
-maximally-spread feature as consequential and it makes almost every sample an outlier: measured, the
-naming feature accounted for 8 of 9 outlier rows, reporting "60% of samples are outliers" where the
-true statement was "1 of 15 diverged consequentially". **A value that does not separate the models
+maximally-spread feature as consequential and it makes almost every sample an outlier, reporting
+"most samples are outliers" where the true statement is that only a handful diverged
+consequentially. **A value that does not separate the models
 is a system-level finding for the variance table, never a per-sample outlier.**
 
 ### Measure the value, not something derived from it
@@ -597,20 +597,20 @@ is a system-level finding for the variance table, never a per-sample outlier.**
 > **When a value is varying, measure the thing it varies at — not something computed downstream
 > from it.**
 
-A container's name is `derive_collection_name(routine name, bound values)`: a pure function, exposed
-as `round_framing.container_name` so a fixture cannot grow a second copy of the scheme. It has no
-discretion at all. Measured across a run it holds exactly, and the bound-value half is
-byte-identical in every sample — so a feature reading the *container* name is reading the **routine
-name through a slug function**, under a label that hides what it is.
+A draw's thinking cost is read as `reasoning_tokens`, the provider's OWN count
+(`usage.completion_tokens_details.reasoning_tokens` on the stored `promptlog` row,
+`MessageStore._extract_reasoning_tokens`) — a read, not a guess. It has no discretion at all: it
+is exactly what the provider billed for that draw's reasoning.
 
-What varies is the framer's output, upstream: **ten distinct routine names for one routine** in
-fifteen samples. So `ROUTINE_NAME` is the feature, read straight off the registry, and it is
-**cosmetic** — `watch_price` and `monitor_listing_price` leave the same round, the same write and
-the same container behind, so the spread belongs in the variance table as the framer's naming spread
-and never as a fact about one sample.
+A reader without that field reaches for the character lengths of the stored `thinking` trace
+against the visible `content` — a ratio computed downstream of two strings a model happens to
+have written at whatever length it chose that draw. That ratio is kept only as the ESTIMATE a
+reader falls back to when a backend doesn't report the real count (`reasoning_tokens = 0`), never
+as the feature itself when the real count is there.
 
-Measuring something derived instead attributes the spread to code with no discretion, and points the
-fix at something that cannot be fixed.
+Measuring the character ratio instead of the reported count attributes verbosity to a proxy two
+steps removed from what actually varies, and points a fix at phrasing rather than at the token
+spend it was meant to describe.
 
 ### A feature that read nothing is not a feature in agreement
 
@@ -761,12 +761,15 @@ Each case runs on the roster's configured model — a PR's and a checkpoint's ev
 on the suite's model (the roster's first entry). A further roster entry stays runnable by name for
 a look, and such a run gates nothing.
 
-**Thresholds are per-model and cannot be shared.** Two measured models differ ~3x on the same
-features (routine-shape entropy 0.53 vs 0.18; tool-sequence 0.69 vs 0.19); one ceiling would be
-either useless for the consistent model or permanently failing for the variant one. A feature that
-does **not** separate two models — the routine name the framer invents, 0.90 on both — is the
-signature of a *system* defect rather than a model one; that comparison is available whenever
-someone runs a second roster entry by name.
+**Thresholds are per-model and cannot be shared.** The naive review's two whole-suite runs at
+commit `774afce6` (PR #2537) landed on different ground: `google/gemma-4-26b-a4b-it` passed
+3788/3808 checks with 52 of 132 features varying; `openai/gpt-oss-20b` passed 3666/3840 with 66
+of 133 varying — a different model varies on a different share of its own features, so a
+ceiling fitted to one run is either loose on the steadier model or permanently failing on the
+noisier one. Where a result lands at a similar rate on both — `memory-change-lands-on-the-entry-that-exists`
+passed 99/105 (94%) on gemma and 95/105 (90%) on gpt-oss — that similarity is the signature of a
+*system* defect rather than a model one; the comparison is available whenever someone runs a
+second roster entry by name.
 
 ---
 
