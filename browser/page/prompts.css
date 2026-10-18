@@ -26,6 +26,16 @@
   display: flex;
   flex-direction: column;
   padding: 2px 0 8px;
+
+  /* The ONE metric-column grid (#2610) shared by run headers
+   * (.run-right) and every step/draw/running row (.row-right), so all
+   * rows' columns land on the same vertical lines. Track order:
+   * steps ↓ ↑ tok/s time duration copy. Sized for the widest realistic
+   * value per column — `100 steps`, `999.9k`, `101.2 tok/s`,
+   * `9:44:14 a.m.`, the pill `12m 34s / 12m 30s`, the 24px copy button.
+   * The narrow breakpoints below shrink — never drop — these tracks. */
+  --metric-cols: 78px 58px 58px 94px 86px 138px 24px;
+  --metric-gap: 8px;
 }
 
 .run {
@@ -170,14 +180,27 @@
   color: var(--text);
 }
 
-/* --- Fixed right-hand cluster --- */
+/* --- Fixed right-hand cluster: the shared metric grid (#2610). The same
+ * track list as .row-right below — steps ↓ ↑ tok/s time duration copy —
+ * with the tracks (and gap) sized once on #runs, so the run header's
+ * metrics and every row's metrics line up vertically. Within each cell the
+ * icon hugs the value and the pair is right-aligned with tabular-nums, so
+ * e.g. `↓ 453` and `↓ 6.5k` share a right edge. --- */
 
 .run-right {
   display: grid;
-  grid-template-columns: 66px 54px 50px 82px 104px 116px 24px; /* steps ↓ ↑ tok/s time pill copy */
-  column-gap: 8px;
+  grid-template-columns: var(--metric-cols);
+  column-gap: var(--metric-gap);
   align-items: center;
   flex-shrink: 0;
+}
+
+/* The two group spans wrap the seven cells: `display: contents` keeps the
+ * cells as the shared grid's direct items at every width; at ~460px the
+ * groups become the two stacked sub-rows the narrow layout is built from
+ * (#2610). */
+.metric-group {
+  display: contents;
 }
 
 .rc {
@@ -199,6 +222,13 @@
   flex-shrink: 0;
   width: auto;
   margin-right: 0;
+}
+
+/* The tok/s unit rides in its own span so the narrow breakpoints can drop
+ * it from the display (#2610); the cell's title always carries the full
+ * "N tok/s" text. */
+.rc-unit {
+  color: var(--text-faint);
 }
 
 .rc-time {
@@ -638,20 +668,32 @@
   flex-shrink: 0;
 }
 
-/* right part: fixed-width grid, identical for every step/draw row so their
- * columns all land on the same vertical lines. */
+/* right part: the same shared metric grid as the run header's .run-right
+ * (#2610) — one track list on #runs, so a step's / draw's / running row's
+ * columns sit exactly under the run header's. */
 
 .row-right {
   display: grid;
-  grid-template-columns: 56px 52px 84px 150px 24px; /* ↓ ↑ tok/s time copy */
-  column-gap: 8px;
+  grid-template-columns: var(--metric-cols);
+  column-gap: var(--metric-gap);
   align-items: center;
   flex-shrink: 0;
 }
 
+/* Column 1 — steps: the numbered chip on a top-level step row; empty for
+ * draws and running rows, keeping the columns aligned across all rows. */
+.cell-steps {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .cell-down,
 .cell-up,
-.cell-toks {
+.cell-toks,
+.cell-dur {
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -686,7 +728,10 @@
   text-overflow: ellipsis;
 }
 
-.cell-time.live-text {
+/* Duration — the resolved row's own call time (the run header carries its
+ * wall/model pill on this same column); a running row's spinner + elapsed
+ * timer tick here. */
+.cell-dur.live-text {
   color: var(--c-model);
   font-weight: 600;
 }
@@ -860,60 +905,88 @@
 }
 
 /* ============================================================
-   Responsive column dropping (#2567) — the right-hand columns NEVER wrap
-   or change width; low-priority ones simply disappear, in this order:
-   tok/s, then steps (run header only), then ↓ / ↑ tokens. The left part
-   keeps truncating with an ellipsis throughout. Only at the ~420px sidebar
-   width does a row wrap at all, and even there the copy-button column
-   stays put. Chip-to-dot collapse at that width is handled generically by
-   shared/components.css's `.chip.chip-dot` rule — nothing to add here.
+   Responsive metric tracks (#2610) — the columns NEVER disappear; as the
+   window narrows the shared tracks, the gap and the wall/model pill's
+   padding shrink in steps (~1100 / ~900 / ~700 / ~560), the tok/s unit drops to a
+   smaller and then title-only form (the number stays), and the flexible
+   left side (name, snippet) gives up the room, truncating with an
+   ellipsis throughout. One track list for run headers and every
+   step/draw/running row, so the columns stay aligned across all rows at
+   every width, and #2605's shared right edge holds throughout.
    ============================================================ */
 
 @media (max-width: 1100px) {
-  .run-right {
-    grid-template-columns: 66px 54px 50px 104px 116px 24px; /* drop tok/s */
+  #runs {
+    --metric-cols: 64px 58px 58px 80px 86px 132px 24px;
+    --metric-gap: 6px;
   }
 
-  .rc-toks {
+  /* The run header's steps icon leaves before the column does — the count
+   * ("100 steps" = 62px) still fits the shrunken track, the icon no
+   * longer does. */
+  .rc-steps i {
     display: none;
   }
 
-  .row-right {
-    grid-template-columns: 56px 52px 150px 24px; /* drop tok/s */
+  /* The tok/s unit shrinks rather than vanishing yet. */
+  .rc-unit {
+    font-size: 9px;
   }
 
-  .cell-toks {
-    display: none;
+  .time-pair {
+    padding: 3px 6px;
   }
 }
 
 @media (max-width: 900px) {
-  .run-right {
-    grid-template-columns: 54px 50px 104px 116px 24px; /* also drop steps */
+  #runs {
+    --metric-cols: 64px 58px 58px 80px 86px 124px 24px;
+    --metric-gap: 5px;
   }
 
-  .rc-steps {
-    display: none;
+  .time-pair {
+    padding: 3px 5px;
+    gap: 4px;
   }
 }
 
-@media (max-width: 850px) {
-  .run-right {
-    grid-template-columns: 104px 116px 24px; /* also drop ↓ / ↑ */
+@media (max-width: 700px) {
+  #runs {
+    --metric-cols: 64px 58px 58px 52px 86px 120px 24px;
+    --metric-gap: 4px;
   }
 
-  .rc-down,
-  .rc-up {
+  /* tok/s: the unit can no longer fit beside its number — it drops from
+   * the display entirely and lives on in the cell's title. */
+  .rc-unit {
     display: none;
   }
 
-  .row-right {
-    grid-template-columns: 150px 24px; /* also drop ↓ / ↑ */
+  .time-pair {
+    padding: 2px 3px;
+  }
+}
+
+@media (max-width: 560px) {
+  #runs {
+    --metric-cols: 56px 52px 52px 48px 74px 108px 24px;
+    --metric-gap: 3px;
   }
 
+  /* One notch smaller type so all seven tracks fit the ~440-500px window
+   * at every nesting depth; the left side keeps truncating. */
+  .rc,
+  .cell-steps,
   .cell-down,
-  .cell-up {
-    display: none;
+  .cell-up,
+  .cell-toks,
+  .cell-time,
+  .cell-dur {
+    font-size: 10px;
+  }
+
+  .time-pair {
+    font-size: 10px;
   }
 }
 
@@ -923,10 +996,11 @@
   }
 
   /* The only breakpoint where a header may wrap — right part drops to its
-   * own full-width line, still right-aligned, copy still its own fixed
-   * column so it stays under every other run's copy button. On the left
-   * line, the collector's sub-target hides — lower priority than the
-   * agent name and the snippet, which keep truncating with an ellipsis. */
+   * own full-width line, still right-aligned, ALL seven columns still on
+   * it (#2610), copy still its own fixed column so it stays under every
+   * other run's copy button. On the left line, the collector's sub-target
+   * hides — lower priority than the agent name and the snippet, which
+   * keep truncating with an ellipsis. */
   .run-header {
     padding: 9px 10px;
     gap: 6px 10px;
@@ -941,24 +1015,43 @@
     display: none;
   }
 
-  .run-right {
+  /* Name/snippet alone on its own line, then the metrics on two stacked
+   * sub-rows — steps ↓ ↑ tok/s, then time duration copy — each right-
+   * aligned on the shared right edge. Every value still shows, nothing is
+   * clipped past the card, and the columns stay aligned across all rows
+   * (#2610); the copy button keeps its own column, one per row. */
+  .run-right,
+  .row-right {
     flex-basis: 100%;
-    justify-content: flex-end;
-    grid-template-columns: 96px 22px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
   }
 
-  .rc-time {
-    display: none;
+  .prompt-header {
+    flex-wrap: wrap;
+    gap: 3px 10px;
+  }
+
+  .metric-group {
+    display: grid;
+    align-items: center;
+    column-gap: var(--metric-gap);
+  }
+
+  .metric-group-a {
+    grid-template-columns: 56px 52px 52px 48px;
+  }
+
+  .metric-group-b {
+    grid-template-columns: 74px 108px 24px;
   }
 
   .run-view-prompts {
     /* Right padding matches .run-header's at this width — the shared right
      * edge (#2605) is still set once, here, by the run body. */
     padding: 9px 10px 10px 6px;
-  }
-
-  .row-right {
-    grid-template-columns: 110px 20px;
   }
 
   .turn-detail {

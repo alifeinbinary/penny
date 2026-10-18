@@ -38,7 +38,7 @@ import {
   runTimingWindow,
   toolCallIds,
 } from "./draw_nesting.js";
-import { formatPillDuration, formatRunTime, formatStepCount } from "./prompt_format.js";
+import { formatPillDuration, formatRunTime, formatStepCount, formatTokens } from "./prompt_format.js";
 import { createSearchBanner, wireSearchClear } from "./shared.js";
 
 // --- Prompts state ---
@@ -882,20 +882,39 @@ function createRunLeftIcon(iconClass: string): string {
   return `<i class="fa-solid ${iconClass}"></i>`;
 }
 
-function createMetricCell(cls: string, iconClass: string, text: string): HTMLElement {
+// One metric cell of the shared right-hand grid (#2610): the icon hugs the
+// value and the pair is right-aligned (see .run-right/.row-right in
+// prompts.css). `unit`, when given, renders in its own span so the narrow
+// breakpoints can drop it from the display; the title always carries the
+// full "value unit" text so the unit stays reachable.
+function createMetricCell(cls: string, iconClass: string, value: string, unit = ""): HTMLElement {
   const cell = document.createElement("span");
   cell.className = `rc ${cls}`;
-  cell.innerHTML = `${createRunLeftIcon(iconClass)}${text}`;
+  cell.innerHTML =
+    `${createRunLeftIcon(iconClass)}<span class="v">${value}</span>` +
+    (unit ? `<span class="rc-unit">${unit}</span>` : "");
+  if (unit) cell.title = `${value} ${unit}`;
   return cell;
+}
+
+// The seven metric cells ride in two group spans: `display: contents` keeps
+// them as direct participants of the one shared grid at every width, while
+// the ~460px breakpoint turns the groups into the two stacked sub-rows the
+// narrow layout is built from (#2610).
+function createMetricGroup(kind: "a" | "b"): HTMLElement {
+  const group = document.createElement("span");
+  group.className = `metric-group metric-group-${kind}`;
+  return group;
 }
 
 function createRunRight(run: PromptLogRun): HTMLElement {
   const right = document.createElement("span");
   right.className = "run-right";
 
-  right.appendChild(createMetricCell("rc-steps", "fa-layer-group", formatStepCount(run.prompt_count)));
-  right.appendChild(createMetricCell("rc-down", "fa-arrow-down", formatTokens(run.total_input_tokens)));
-  right.appendChild(createMetricCell("rc-up", "fa-arrow-up", formatTokens(run.total_output_tokens)));
+  const groupA = createMetricGroup("a");
+  groupA.appendChild(createMetricCell("rc-steps", "fa-layer-group", formatStepCount(run.prompt_count)));
+  groupA.appendChild(createMetricCell("rc-down", "fa-arrow-down", formatTokens(run.total_input_tokens)));
+  groupA.appendChild(createMetricCell("rc-up", "fa-arrow-up", formatTokens(run.total_output_tokens)));
   // tok/s is paired with "model time" (total_duration_ms, this run's OWN
   // prompts only) deliberately — that's the number that actually measures
   // generation throughput; "wall time" below also counts child draws (a
@@ -903,15 +922,17 @@ function createRunRight(run: PromptLogRun): HTMLElement {
   const tokPerSec = run.total_duration_ms > 0
     ? ((run.total_output_tokens / run.total_duration_ms) * 1000).toFixed(1)
     : "0";
-  right.appendChild(createMetricCell("rc-toks", "fa-gauge-high", `${tokPerSec} tok/s`));
+  groupA.appendChild(createMetricCell("rc-toks", "fa-gauge-high", tokPerSec, "tok/s"));
+  right.appendChild(groupA);
 
+  const groupB = createMetricGroup("b");
   const time = document.createElement("span");
   time.className = "rc rc-time";
   time.textContent = formatRunTime(run.started_at);
   time.title = new Date(run.started_at).toLocaleString();
-  right.appendChild(time);
+  groupB.appendChild(time);
 
-  right.appendChild(createTimePillCell(run));
+  groupB.appendChild(createTimePillCell(run));
 
   const copyCell = document.createElement("span");
   copyCell.className = "rc rc-copy";
@@ -924,7 +945,8 @@ function createRunRight(run: PromptLogRun): HTMLElement {
       `Copy all ${run.prompt_count} prompts as JSON (run_id ${run.run_id})`,
     ),
   );
-  right.appendChild(copyCell);
+  groupB.appendChild(copyCell);
+  right.appendChild(groupB);
 
   return right;
 }
@@ -1155,7 +1177,7 @@ function createOutcomeBadgeChip(label: string, prompt: PromptLogEntry): HTMLElem
   return chip;
 }
 
-function createStepRowLeft(prompt: PromptLogEntry, step: number): HTMLElement {
+function createStepRowLeft(prompt: PromptLogEntry): HTMLElement {
   const left = document.createElement("span");
   left.className = "row-left";
   left.appendChild(createRowChev(true));
@@ -1170,36 +1192,63 @@ function createStepRowLeft(prompt: PromptLogEntry, step: number): HTMLElement {
   if (snippet) name.title = snippet;
   left.appendChild(name);
 
-  const badge = document.createElement("span");
-  badge.className = "row-badge";
-  const stepBadge = document.createElement("span");
-  stepBadge.className = "step-badge";
-  stepBadge.textContent = `STEP ${step}`;
-  badge.appendChild(stepBadge);
+  // The STEP chip lives in the shared right grid's steps column now (#2610)
+  // — the run header's step count sits on that same vertical line — so the
+  // left badge carries only an outcome chip, and only when there is one.
   const outcomeLabel = callOutcomeLabel(prompt.call_outcome);
-  if (outcomeLabel) badge.appendChild(createOutcomeBadgeChip(outcomeLabel, prompt));
-  left.appendChild(badge);
+  if (outcomeLabel) {
+    const badge = document.createElement("span");
+    badge.className = "row-badge";
+    badge.appendChild(createOutcomeBadgeChip(outcomeLabel, prompt));
+    left.appendChild(badge);
+  }
 
   return left;
 }
 
-function createPromptRowRight(prompt: PromptLogEntry): HTMLElement {
+// The shared right grid (#2610) — same tracks as the run header's
+// .run-right, so every row's steps / ↓ / ↑ / tok/s / time / duration / copy
+// columns land on the run header's vertical lines. `step` is given only for
+// a top-level step row: its numbered chip fills the steps column; draws and
+// running rows leave that column empty.
+function createPromptRowRight(prompt: PromptLogEntry, step?: number): HTMLElement {
   const right = document.createElement("span");
   right.className = "row-right";
+
+  const groupA = createMetricGroup("a");
+  const stepsCell = document.createElement("span");
+  stepsCell.className = "cell-steps";
+  if (step !== undefined) {
+    const chip = document.createElement("span");
+    chip.className = "step-badge";
+    chip.textContent = `STEP ${step}`;
+    stepsCell.appendChild(chip);
+  }
+  groupA.appendChild(stepsCell);
+
   const tokPerSec = prompt.duration_ms > 0
     ? ((prompt.output_tokens / prompt.duration_ms) * 1000).toFixed(1)
     : "0";
-  right.appendChild(createCellMetric("cell-down", "fa-arrow-down", formatTokens(prompt.input_tokens)));
-  right.appendChild(createCellMetric("cell-up", "fa-arrow-up", formatTokens(prompt.output_tokens)));
-  right.appendChild(createCellMetric("cell-toks", "fa-gauge-high", `${tokPerSec} tok/s`));
+  groupA.appendChild(createCellMetric("cell-down", "fa-arrow-down", formatTokens(prompt.input_tokens)));
+  groupA.appendChild(createCellMetric("cell-up", "fa-arrow-up", formatTokens(prompt.output_tokens)));
+  groupA.appendChild(createCellMetric("cell-toks", "fa-gauge-high", tokPerSec, "tok/s"));
+  right.appendChild(groupA);
 
+  const groupB = createMetricGroup("b");
   const time = document.createElement("span");
   time.className = "cell-time";
   // This call's own start — timestamp minus its duration (#2438), the same
   // subtraction the run header's wall time is built from, so a step's shown
-  // start can never disagree with it.
-  time.textContent = `${formatTimeOfDay(rowStartedAt(prompt))} · ${formatDuration(prompt.duration_ms)}`;
-  right.appendChild(time);
+  // start can never disagree with it. Start and duration are separate cells
+  // on the shared grid now (#2610) — the run header's start time and its
+  // wall/model pill sit on these same two columns.
+  time.textContent = formatTimeOfDay(rowStartedAt(prompt));
+  groupB.appendChild(time);
+
+  const dur = document.createElement("span");
+  dur.className = "cell-dur";
+  dur.textContent = formatDuration(prompt.duration_ms);
+  groupB.appendChild(dur);
 
   const copyCell = document.createElement("span");
   copyCell.className = "cell-copy";
@@ -1208,20 +1257,27 @@ function createPromptRowRight(prompt: PromptLogEntry): HTMLElement {
   copyCell.appendChild(
     createCopyButton(() => jsonOf(prompt), `Copy this prompt as JSON (promptlog id ${prompt.id})`),
   );
-  right.appendChild(copyCell);
+  groupB.appendChild(copyCell);
+  right.appendChild(groupB);
 
   return right;
 }
 
-function createCellMetric(cls: string, iconClass: string, text: string): HTMLElement {
+// Same shared-grid metric cell shape as createMetricCell above (#2610) —
+// icon hugging the value, right-aligned, optional unit span with the full
+// text carried in the title.
+function createCellMetric(cls: string, iconClass: string, value: string, unit = ""): HTMLElement {
   const cell = document.createElement("span");
   cell.className = cls;
-  cell.innerHTML = `<i class="fa-solid ${iconClass}"></i><span class="v">${text}</span>`;
+  cell.innerHTML =
+    `<i class="fa-solid ${iconClass}"></i><span class="v">${value}</span>` +
+    (unit ? `<span class="rc-unit">${unit}</span>` : "");
+  if (unit) cell.title = `${value} ${unit}`;
   return cell;
 }
 
 function createPromptCard(prompt: PromptLogEntry, step: number): HTMLElement {
-  return buildPromptShell(prompt, createStepRowLeft(prompt, step), createPromptRowRight(prompt));
+  return buildPromptShell(prompt, createStepRowLeft(prompt), createPromptRowRight(prompt, step));
 }
 
 // A draw's own row-left — the same prompt-detail renderer every top-level
@@ -1301,26 +1357,38 @@ function createRunningElapsed(startedAt: string): HTMLElement {
 function createRunningRowRight(elapsedStartedAt: string | null): HTMLElement {
   const right = document.createElement("span");
   right.className = "row-right";
-  right.appendChild(document.createElement("span")).className = "cell-down";
-  right.appendChild(document.createElement("span")).className = "cell-up";
-  right.appendChild(document.createElement("span")).className = "cell-toks";
 
-  const time = document.createElement("span");
-  time.className = elapsedStartedAt ? "cell-time live-text" : "cell-time";
+  // Placeholder cells for the shared grid (#2610) — nothing to show in
+  // steps / ↓ / ↑ / tok/s / start time while the call is still running.
+  const groupA = createMetricGroup("a");
+  groupA.appendChild(document.createElement("span")).className = "cell-steps";
+  groupA.appendChild(document.createElement("span")).className = "cell-down";
+  groupA.appendChild(document.createElement("span")).className = "cell-up";
+  groupA.appendChild(document.createElement("span")).className = "cell-toks";
+  right.appendChild(groupA);
+
+  const groupB = createMetricGroup("b");
+  groupB.appendChild(document.createElement("span")).className = "cell-time";
+
+  // The elapsed timer ticks in the duration column — the slot the resolved
+  // row's own duration will occupy.
+  const dur = document.createElement("span");
+  dur.className = elapsedStartedAt ? "cell-dur live-text" : "cell-dur";
   if (elapsedStartedAt) {
     const spinner = document.createElement("i");
     spinner.className = "fa-solid fa-spinner fa-spin";
-    time.appendChild(spinner);
-    time.appendChild(createRunningElapsed(elapsedStartedAt));
+    dur.appendChild(spinner);
+    dur.appendChild(createRunningElapsed(elapsedStartedAt));
   }
-  right.appendChild(time);
+  groupB.appendChild(dur);
 
   const copyCell = document.createElement("span");
   copyCell.className = "cell-copy";
   const emptySlot = document.createElement("span");
   emptySlot.className = "copy-slot-empty";
   copyCell.appendChild(emptySlot);
-  right.appendChild(copyCell);
+  groupB.appendChild(copyCell);
+  right.appendChild(groupB);
 
   return right;
 }
@@ -1770,11 +1838,6 @@ function prettyJson(value: string): string {
   } catch {
     return value;
   }
-}
-
-function formatTokens(count: number): string {
-  if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
-  return String(count);
 }
 
 function formatDuration(ms: number): string {
