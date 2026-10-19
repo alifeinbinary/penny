@@ -470,6 +470,9 @@ async def test_extract_without_model_client_degrades_visibly(tmp_path):
     )
     assert result.success is False
     assert _CATALOGUE_BODY not in result.message
+    # The page WAS read successfully (only the extraction degraded), so it is a
+    # source URL even on the no-model path (#2648).
+    assert result.source_urls == [_CATALOGUE_URL]
 
 
 # ── Whole-render literals: the enumerated micro-result forms (via execute) ─────
@@ -698,6 +701,9 @@ async def test_failed_fetch_in_the_middle_keeps_its_slot(tmp_path):
         f"{PennyConstants.BROWSE_PAGE_HEADER}{_PAGE_URL_3}\n{_INSTRUCTION}: {_EXTRACTED_VALUE_3}",
     ]
     assert result.success is True
+    # The two pages that actually read carry their URLs, in read order; the
+    # failed fetch in the middle contributes none (#2648).
+    assert result.source_urls == [_PAGE_URL, _PAGE_URL_3]
 
 
 # ── A search is links; a failed page extraction keeps the page's (#2141) ──────
@@ -727,6 +733,8 @@ async def test_search_section_is_returned_as_links_and_never_extracted(tmp_path)
     )
     assert model.requests == []  # the extractor was never asked to read a link list
     assert result.success is True
+    # A search read nothing, so it contributes no source URL (#2648).
+    assert result.source_urls == []
 
 
 @pytest.mark.asyncio
@@ -762,6 +770,9 @@ async def test_search_beside_a_page_read_extracts_only_the_page(tmp_path):
         f"{PennyConstants.BROWSE_PAGE_HEADER}{_PAGE_URL}"
     ]
     assert result.success is True
+    # Only the PAGE READ counts as read for the reply's source URLs (#2648) —
+    # the search beside it contributes nothing.
+    assert result.source_urls == [_PAGE_URL]
 
 
 @pytest.mark.asyncio
@@ -1076,13 +1087,21 @@ def test_micro_context_system_prompt_is_plain_text_with_no_tags():
     contract (#1682/#1942/#2360) retired entirely — reading a page is not a
     reasoning task, so the draw answers in plain text, as a list when several
     things are asked for, naming a shortfall or a total absence in a plain
-    sentence, never a separate tagged line."""
+    sentence, never a separate tagged line.  The value leads with the page's
+    own address (#2648): the URL the content is headed by is part of the value,
+    not scaffolding, so the enclosing turn can cite its source."""
     assert MICRO_CONTEXT_SYSTEM_PROMPT == (
         "You are an extraction step. You are given the full text of one or more web "
         "pages and a single instruction naming exactly what to pull out of them. "
         "Answer in plain text from the page alone, as a list with one item per "
         "line when the instruction asks for several, and never a value the page "
         "doesn't state.\n"
+        "\n"
+        "Each page's content begins with that page's own address — the URL the page "
+        "was read at — and the address is part of the value: begin every answer with "
+        "the URL of the page it came from, so the person reading the answer knows "
+        "where it came from and can go back to it, whatever the instruction asked "
+        "for.\n"
         "\n"
         "An instruction often names several things at once, and a page rarely "
         "carries all of them. Give what the page has for each thing named, in the "
@@ -1098,7 +1117,8 @@ def test_micro_context_system_prompt_is_plain_text_with_no_tags():
         "sentence and stop there.\n"
         "\n"
         "Write only the answer — no preamble, no restating the instruction, and "
-        "nothing about how you are answering."
+        "nothing about how you are answering. The address the answer begins with is "
+        "part of the answer, not a preamble."
     )
 
 
