@@ -600,8 +600,14 @@ def standing_rules_entries(db: Database) -> list[MemoryEntry]:
 
 def render_standing_rules(db: Database) -> str:
     """The standing rules' BODY: every entry in the ``rules`` collection in full,
-    oldest first, each as ``- <key>: <content> (added <date>)`` — a verbatim render
-    of the store, the same as any other data section.
+    oldest first, each as its own sentence — ``- <content>`` — and nothing else
+    (#2647).  A rule reads as an instruction, never as a callable name: the entry's
+    key is a snake_case name, and a bare snake_case name followed by an instruction
+    reads exactly like the tool list the prompt carries two sections down, which is
+    how one prod turn came to call a rule's key as a tool.  A rule is still one
+    guess-free call to read or change: the section names the collection it renders,
+    and ``collection_keys``/``collection_list`` on ``rules`` read the keys and the
+    ``added`` stamps the render leaves out.
 
     With none — or no collection row at all — the one empty-collection line renders
     instead, so the ``rules`` anchor is on screen in every state: the write that adds
@@ -610,10 +616,7 @@ def render_standing_rules(db: Database) -> str:
     entries = standing_rules_entries(db)
     if not entries:
         return SelfStateHeader.EMPTY_STANDING_RULES
-    return "\n".join(
-        f"- {entry.key}: {entry.content} (added {format_log_timestamp(entry.created_at)})"
-        for entry in entries
-    )
+    return "\n".join(f"- {entry.content}" for entry in entries)
 
 
 def standing_rules_section(db: Database) -> str:
@@ -628,13 +631,14 @@ def standing_rules_section(db: Database) -> str:
 
 # The one line that frames the rules where the chat agent reads INSTRUCTIONS.  Stated
 # in plain words, no imperative: the rules govern the whole message, its last
-# characters included, and the user's own ask wins over Penny's default style
-# wherever that style is stated in the prompt — named as the general case, never by
-# any one rule's words.
+# characters included, and a rule wins over anything else the prompt says — how she
+# looks things up and what she does, as well as how she writes — named as the general
+# case, never by any one rule's words (#2647).
 STANDING_RULES_FRAMING = (
     "The user's standing rules: follow each one in everything you send, to the very "
-    "end of the message. Where a rule asks for something different from the style "
-    "guidance in this prompt, the rule is what they want."
+    "end of the message. Where a rule asks for something different from any other "
+    "guidance in this prompt — how you look things up, what you do, or how you "
+    "write — the rule is what they want."
 )
 
 

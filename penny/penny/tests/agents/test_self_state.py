@@ -1118,11 +1118,12 @@ async def test_full_chat_system_prompt_composition(db):
 _STANDING_RULES_INSTRUCTION = (
     "### Standing rules\n"
     "The user's standing rules: follow each one in everything you send, to the very "
-    "end of the message. Where a rule asks for something different from the style "
-    "guidance in this prompt, the rule is what they want.\n"
+    "end of the message. Where a rule asks for something different from any other "
+    "guidance in this prompt — how you look things up, what you do, or how you "
+    "write — the rule is what they want.\n"
     "\n"
-    "- page links: always include a link when you mention a page (added 2026-07-11 07:00 UTC)\n"
-    "- no metric units: never use metric units (added 2026-07-11 07:30 UTC)"
+    "- always include a link when you mention a page\n"
+    "- never use metric units"
 )
 
 _KITCHEN_SINK = (

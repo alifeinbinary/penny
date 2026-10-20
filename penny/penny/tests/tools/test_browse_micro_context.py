@@ -47,7 +47,6 @@ from penny.database.models import PromptLog
 from penny.llm.call_link import CallLink
 from penny.llm.client import LlmClient
 from penny.llm.models import LlmMessage, LlmResponse, LlmTimeoutError
-from penny.prompts import Prompt
 from penny.tests.mocks.llm_patches import MockLlmClient
 from penny.tests.schema_template import migrated_db
 from penny.tools import ToolCall, ToolExecutor, ToolRegistry
@@ -96,19 +95,21 @@ _EXTRACTED_VALUE_3 = "The current bid is 3 zorkmids."
 _MARKER_3 = "Copper Sundial"  # page 3's body phrase
 
 # A SEARCH query (#2141).  Plain text is routed through the configured search URL, and
-# what comes back is rendered by ``_trim_search_result`` — the "titles and links only"
-# header plus the lines around each solo link.  It is never extracted from, so its
-# whole render is the literal the main loop reads.
+# what comes back is ``_trim_search_result``'s numbered list of titles and URLs
+# (#2647) — nothing else from the page, so the details live only on the pages.  It is
+# never extracted from, so its whole render is the literal the main loop reads.
 _SEARCH_QUERY = "antique compass auctions"
 _SEARCH_PAGE_URL = f"https://duckduckgo.com/?q={urllib.parse.quote(_SEARCH_QUERY)}"
 _SEARCH_RESULT_LINK = "[Lot 42 — the compass lot](https://auctions.example/lot/42)"
 _SEARCH_PAGE_TEXT = (
-    "Title: antique compass auctions — results\n"
-    "Zephyr compasses are eighteenth-century navigation instruments.\n"
-    f"{_SEARCH_RESULT_LINK}\n"
-    "Bidding closes Friday."
+    f"### antique compass auctions — results\n\n{_SEARCH_RESULT_LINK}\nBidding closes Friday."
 )
-_TRIMMED_SEARCH_RESULT = f"{Prompt.SEARCH_RESULT_HEADER}\n\n{_SEARCH_PAGE_TEXT}"
+_TRIMMED_SEARCH_RESULT = (
+    'You searched for "antique compass auctions". These are the results: titles and '
+    "links only. To answer the user, read the promising ones by passing their URLs in "
+    "your next browse.\n\n"
+    "1. antique compass auctions — results (https://auctions.example/lot/42)"
+)
 
 # A PAGE READ carrying standalone markdown links — the anchor a FAILED extraction hands
 # back (#2141), since the body itself never enters the conversation.
@@ -800,7 +801,7 @@ async def test_search_section_is_returned_as_links_and_never_extracted(tmp_path)
     """A SEARCH query under ``extract`` comes back as its trimmed list of links, and no
     micro-context is drawn for it (#2141).
 
-    ``_page_section`` prepends ``Prompt.SEARCH_RESULT_HEADER`` — an instruction written
+    ``_page_section`` prepends ``Prompt.SEARCH_RESULT_INSTRUCTION`` — an instruction written
     for the CHAT model, telling it to pick a URL and read it.  Handing that to the
     extractor had the extractor obey it: its output was a bare URL, which violates the
     declared ``EXTRACTED:``/``NOT_PRESENT:`` shape, was re-rolled the whole budget, and
