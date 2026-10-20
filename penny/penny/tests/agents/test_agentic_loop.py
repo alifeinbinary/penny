@@ -2148,6 +2148,68 @@ class TestSearchResultTrimming:
         assert "Genre" not in result
         assert "Created by" not in result
 
+    def test_only_heading_backed_links_are_results(self):
+        """A Kagi-shaped page — a knowledge-panel paragraph, a bare link, three
+        infobox rows each followed by a link, then ordinary heading+link results —
+        renders only the ordinary results, numbered by heading and URL (#2697).
+        The panel prose and infobox rows never render as titles."""
+        content = "\n".join(
+            [
+                "London is the capital and largest city of both England and the United",
+                "Kingdom, standing on the River Thames in south-east England at its",
+                "navigable estuary.",
+                "",
+                "[london.wikilike.org](https://london.wikilike.org/wiki/London)",
+                "",
+                "Website",
+                "[cityoflondon.gov.example](https://www.cityoflondon.gov.example/)",
+                "",
+                "Country",
+                "[uk.wikilike.org](https://uk.wikilike.org/wiki/United_Kingdom)",
+                "",
+                "• Type",
+                "[citystatus.wikilike.org](https://citystatus.wikilike.org/wiki/City_status)",
+                "",
+                "### London - Wikilike",
+                "[london.wikilike.org](https://london.wikilike.org/wiki/London)",
+                "",
+                "### Visit London — official guide",
+                "[visitlondon.example.com](https://www.visitlondon.example.com/)",
+            ]
+        )
+        result = _trim_search_result(content, "london", "kagi.com")
+        assert result == (
+            'You searched for "london". These are the results, titles and URLs only. '
+            "You must read them to answer the user:\n"
+            "\n"
+            "1. London - Wikilike (https://london.wikilike.org/wiki/London)\n"
+            "2. Visit London — official guide (https://www.visitlondon.example.com/)"
+        )
+
+    def test_links_without_headings_list_by_link_text(self):
+        """A page whose links all sit under non-heading lines — links but no
+        headings at all — still renders the numbered list under the instruction
+        header, each link titled by its own link text (#2697): the raw page must
+        never enter the context under no header."""
+        content = "\n".join(
+            [
+                "London is the capital of England.",
+                "",
+                "[london.wikilike.org](https://london.wikilike.org/wiki/London)",
+                "",
+                "Website",
+                "[cityoflondon.gov.example](https://www.cityoflondon.gov.example/)",
+            ]
+        )
+        result = _trim_search_result(content, "london", "kagi.com")
+        assert result == (
+            'You searched for "london". These are the results, titles and URLs only. '
+            "You must read them to answer the user:\n"
+            "\n"
+            "1. london.wikilike.org (https://london.wikilike.org/wiki/London)\n"
+            "2. cityoflondon.gov.example (https://www.cityoflondon.gov.example/)"
+        )
+
     def test_engine_affordance_links_are_not_results(self):
         """A standalone link back at the search engine's own host — its summariser,
         its maps — is the engine's affordance, not a result, and is dropped."""
