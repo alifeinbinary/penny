@@ -1,0 +1,185 @@
+"""HandleTable — the run's numbered link table (#2717).
+
+Pure-utility unit tests: the table is registration, conversion, expansion and
+the dangling check — no database, no model.  The integration behaviour (a
+browse result rendered as handles, a reply expanded at send) is covered by the
+browse and agentic-loop tests that drive those seams.
+"""
+
+from penny.tools.link_handles import CITATION_LINE, PAGE_CITATION_LINE, HandleTable
+
+
+def test_register_assigns_on_first_sight_and_is_stable():
+    table = HandleTable()
+    assert table.register("https://a.example/x") == 1
+    assert table.register("https://b.example/y") == 2
+    assert table.register("https://a.example/x") == 1
+    assert len(table) == 2
+    assert table.url_for(1) == "https://a.example/x"
+
+
+def test_convert_markdown_links_and_standalone_urls():
+    table = HandleTable()
+    text = "Read [the report](https://a.example/r) today.\nhttps://b.example/n\n"
+    converted = table.convert(text)
+    assert converted == "Read [the report][1] today.\n[2]\n"
+    assert table.url_for(1) == "https://a.example/r"
+    assert table.url_for(2) == "https://b.example/n"
+
+
+def test_convert_drops_images():
+    table = HandleTable()
+    converted = table.convert(
+        "See ![chart](https://a.example/c.png) and [the page](https://a.example/p)"
+    )
+    assert converted == "See  and [the page][1]"
+    assert table.url_for(1) == "https://a.example/p"
+
+
+def test_convert_bare_url_inside_a_line():
+    """A bare URL ANYWHERE in a line converts — the stored-digest form
+    ``Headline - https://…`` is exactly the production path that broke."""
+    table = HandleTable()
+    converted = table.convert("Headline - https://x.com/a.")
+    assert converted == "Headline - [1]."
+    assert table.url_for(1) == "https://x.com/a"
+
+
+def test_convert_bare_url_inside_parens():
+    """A bare URL inside prose parens converts, and the paren the URL never
+    opened stays around the handle."""
+    table = HandleTable()
+    assert table.convert("(see https://x.com/a)") == "(see [1])"
+
+
+def test_convert_keeps_parens_the_url_opened():
+    """A ``)`` that closes a ``(`` the URL itself opened is part of the address —
+    a Wikipedia link keeps its brackets."""
+    table = HandleTable()
+    url = "https://en.wikipedia.org/wiki/Dune_(novel)"
+    converted = table.convert(f"The novel is at {url}, read it.")
+    assert converted == "The novel is at [1], read it."
+    assert table.url_for(1) == url
+
+
+def test_convert_self_link_collapses_to_the_handle():
+    """A link whose text is its own URL carries no readable address at all."""
+    table = HandleTable()
+    assert table.convert("[https://x.com/a](https://x.com/a)") == "[1]"
+
+
+def test_convert_markdown_link_url_is_not_double_converted():
+    """A URL already inside a markdown link's ``(...)`` is gone with that link
+    before the bare pass runs — one handle, no double registration."""
+    table = HandleTable()
+    converted = table.convert("see [the page](https://x.com/a) ok")
+    assert converted == "see [the page][1] ok"
+    assert len(table) == 1
+
+
+def test_convert_is_idempotent():
+    table = HandleTable()
+    text = "[a](https://a.example/x)\nhttps://b.example/y"
+    assert table.convert(table.convert(text)) == table.convert(text)
+
+
+def test_convert_browse_section_includes_the_header_url():
+    table = HandleTable()
+    section = "## browse: https://a.example/page\nBody [link](https://b.example/l) text"
+    converted = table.convert_browse_section(section)
+    assert converted.startswith("## browse: [1]\n")
+    assert "[link][2]" in converted
+    assert "https://" not in converted
+
+
+def test_expand_bare_and_text_forms():
+    table = HandleTable()
+    table.register("https://a.example/x")
+    table.register("https://b.example/y")
+    assert table.expand("see [1] and [the b page][2]") == (
+        "see https://a.example/x and [the b page](https://b.example/y)"
+    )
+
+
+def test_expand_leaves_dangling_handles_as_written():
+    table = HandleTable()
+    table.register("https://a.example/x")
+    assert table.expand("see [1] and [9]") == "see https://a.example/x and [9]"
+
+
+def test_expand_consumes_a_target_glued_after_the_handle():
+    """``[12](https://site.example)`` — the hybrid the model composes when it
+    treats the handle as a markdown link: the whole citation expands to the
+    URL, and the site root it knew must not survive beside the expansion (the
+    stored-digest sample that stored ``story-url(site-root)``)."""
+    table = HandleTable()
+    table.register("https://news.example/story-1")
+    table.register("https://news.example/story-2")
+    assert table.expand("see [2](https://site.example)") == "see https://news.example/story-2"
+    assert table.dangling("cite [3](https://site.example)") == [3]
+
+
+def test_expand_consumes_a_handle_written_as_the_target():
+    """``[text](12)`` — the number written as the target — is the same citation
+    in the other order: the whole form expands to the URL."""
+    table = HandleTable()
+    table.register("https://news.example/story-1")
+    assert table.expand("the [harbour story](1) leads") == (
+        "the https://news.example/story-1 leads"
+    )
+    assert table.dangling("the [harbour story](7) leads") == [7]
+
+
+def test_expand_leaves_a_genuine_markdown_link_alone():
+    """A markdown link whose bracket is not a number and whose target is not a
+    number is a real link — expansion never touches it."""
+    table = HandleTable()
+    table.register("https://news.example/story-1")
+    text = "read [the report](https://real.example/report) today"
+    assert table.expand(text) == text
+
+
+def test_from_mapping_roundtrips():
+    table = HandleTable()
+    table.register("https://a.example/x")
+    table.register("https://b.example/y")
+    rebuilt = HandleTable.from_mapping(table.mapping())
+    assert rebuilt.expand("see [1] and [the y page][2]") == (
+        "see https://a.example/x and [the y page](https://b.example/y)"
+    )
+    assert rebuilt.dangling("[3]") == [3]
+
+
+def test_dangling_reports_only_unknown_numbers_and_only_when_links_exist():
+    empty = HandleTable()
+    assert empty.dangling("[27] people said") == []
+    table = HandleTable()
+    table.register("https://a.example/x")
+    table.register("https://b.example/y")
+    assert table.dangling("cite [1] then [2] then [27] again [27]") == [27]
+    assert table.dangling("no citations here") == []
+
+
+def test_dangling_note_names_the_range():
+    table = HandleTable()
+    for i in range(1, 25):
+        table.register(f"https://a.example/{i}")
+    note = table.dangling_note([27, 31])
+    assert note == "There is no link [27], [31] in this turn; the links you have are [1]–[24]."
+
+
+def test_dangling_note_on_an_empty_table():
+    note = HandleTable().dangling_note([3])
+    assert note == "There is no link [3] in this turn; there are no numbered links."
+
+
+def test_citation_lines():
+    assert PAGE_CITATION_LINE.startswith("Links on this page are numbered, like [12].")
+    assert CITATION_LINE.startswith("Links are numbered, like [12].")
+
+
+def test_empty_table_is_falsy():
+    table = HandleTable()
+    assert not table
+    table.register("https://a.example/x")
+    assert table
