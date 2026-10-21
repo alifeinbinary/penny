@@ -46,6 +46,7 @@ from penny.tools.collection_instantiation import (
     next_occurrence,
     parse_expires_at,
     parse_schedule,
+    render_prompt_replacement_diff,
     render_schedule_clause,
 )
 from penny.tools.job_summary import job_summary_line
@@ -63,6 +64,7 @@ from penny.tools.memory_tools import (
     _RULES_GUARD_REFUSAL,
     _SAME_JOB_UPDATED,
     EXPIRES_AT_PARAM_DESCRIPTION,
+    PROMPT_PARAM_DESCRIPTION,
     SCHEDULE_PARAM_DESCRIPTION,
     CollectionArchiveTool,
     CollectionCreateTool,
@@ -1016,13 +1018,15 @@ class TestBlankOptionalArgsAreRefused:
     async def test_every_optional_string_names_its_own_form(self, db):
         """Uniform across the surface — each optional string refuses a blank with ITS
         accepted form, so the guard isn't special-cased to ``expires_at``.  A
-        whitespace-only value is the same miss as an empty one.  ``expires_at`` and
-        ``schedule`` each carry their own schema descriptor (#2250/#2222, each shared
-        across create/update/set), so their lines also name them; the remaining fields
-        are still bare in this tool's schema."""
+        whitespace-only value is the same miss as an empty one.  ``expires_at``,
+        ``schedule`` and ``prompt`` each carry their own schema descriptor
+        (#2250/#2222, each shared across create/update/set; ``prompt``'s came with
+        #2719), so their lines also name them; ``description`` is still bare in this
+        tool's schema."""
         tool = CollectionSetTool(db, cast(Any, MockLlmClient()))
         descriptors = {
             "expires_at": EXPIRES_AT_PARAM_DESCRIPTION,
+            "prompt": PROMPT_PARAM_DESCRIPTION,
             "schedule": SCHEDULE_PARAM_DESCRIPTION,
         }
         for field, form in OPTIONAL_ARG_FORMS.items():
@@ -1341,6 +1345,90 @@ class TestCollectionUpdateScheduleAtApply:
         stored = db.memories.get("watch")
         assert stored.extraction_prompt == new_prompt
         assert stored.schedule == "FREQ=DAILY;BYHOUR=11"
+
+    @pytest.mark.asyncio
+    async def test_replacing_an_existing_prompt_shows_the_lines_it_dropped(self, db):
+        """A configure call that REPLACES an existing prompt reports the change as a
+        line diff (#2719): the old prompt's lines the new one doesn't carry, and the new
+        ones it didn't have, verbatim — so a rebuild-from-the-summary sees the rules and
+        formatting it dropped.  Reported, never blocked: the row holds the new prompt."""
+        _seed_collection(
+            db,
+            name="film-finds",
+            extraction_prompt=(
+                "Read the coming-soon page and pick the films worth seeing this week.\n"
+                "Documentaries only, no TV series.\n"
+                'Write every entry as "Title — <date>: <reason>".'
+            ),
+        )
+        new_prompt = "Read the coming-soon page and list new releases."
+        result = await CollectionUpdateTool(db, cast(Any, MockLlmClient())).execute(
+            CallLink.new_top(), name="film-finds", prompt=new_prompt
+        )
+        assert result.success
+        assert "Prompt replaced — the collector now runs the new text:" in result.message
+        assert "  removed:" in result.message
+        assert "    - Documentaries only, no TV series." in result.message
+        assert '    - Write every entry as "Title — <date>: <reason>".' in result.message
+        assert "  added:" in result.message
+        assert f"    - {new_prompt}" in result.message
+        assert "Put back any removed line the user's ask didn't drop" in result.message
+        assert db.memories.get("film-finds").extraction_prompt == new_prompt
+
+    @pytest.mark.asyncio
+    async def test_adopting_a_prompt_renders_no_diff(self, db):
+        """An adopt replaces nothing — there is no prior prompt to diff against, so the
+        echo carries no diff block."""
+        await CollectionCreateTool(db, cast(Any, MockLlmClient())).execute(
+            CallLink.new_top(), name="deals-watch", description="track the shoe deals"
+        )
+        result = await CollectionUpdateTool(db, cast(Any, MockLlmClient())).execute(
+            CallLink.new_top(),
+            name="deals-watch",
+            prompt="Check Cinder Peak's elevation above sea level and save it.",
+        )
+        assert result.success
+        assert "removed:" not in result.message
+        assert "added:" not in result.message
+
+    def test_the_prompt_diff_render_holds_its_edges(self):
+        """The pure render's edges: an adopt (no before) renders nothing; identical
+        text renders nothing; a whitespace-only re-indentation counts as unchanged;
+        a blank line counts on neither side, so it never renders as a removed
+        ``    - `` item."""
+        assert render_prompt_replacement_diff(None, "new text") is None
+        assert render_prompt_replacement_diff("same", "same") is None
+        assert render_prompt_replacement_diff("same", " same ") is None
+        blank_before = render_prompt_replacement_diff("\n\n", "still just blank")
+        # A before of nothing but blank lines has nothing removed, so only the
+        # added section renders.
+        assert blank_before == (
+            "Prompt replaced — the collector now runs the new text:\n"
+            "  added:\n"
+            "    - still just blank"
+        )
+        diff = render_prompt_replacement_diff("keep\n drop me", "keep\n add me")
+        assert diff == (
+            "Prompt replaced — the collector now runs the new text:\n"
+            "  removed:\n"
+            "    -  drop me\n"
+            "  added:\n"
+            "    -  add me\n"
+            "Put back any removed line the user's ask didn't drop — send them again "
+            "with a new `prompt`."
+        )
+        blank = render_prompt_replacement_diff("keep\n\n drop me", "keep\n add me\n\n")
+        # The dropped and added blank lines render nothing — no ``    - `` item,
+        # no section, just the two real lines.
+        assert blank == (
+            "Prompt replaced — the collector now runs the new text:\n"
+            "  removed:\n"
+            "    -  drop me\n"
+            "  added:\n"
+            "    -  add me\n"
+            "Put back any removed line the user's ask didn't drop — send them again "
+            "with a new `prompt`."
+        )
 
 
 class TestCollectionWritesAndReads:
