@@ -1473,7 +1473,10 @@ class CollectionWriteTool(MemoryTool):
             )
         target, note = await self._materialize_target(args)
         collection = _resolve(self._db, target)
-        entries = [await self._build_entry(spec) for spec in args.entries]
+        writable, refused_note = self._split_dangling(args.entries)
+        if refused_note is not None and not writable:
+            return ToolResult(message=refused_note, success=False)
+        entries = [await self._build_entry(spec) for spec in writable]
         embed_failure = self._embed_failure(target, entries)
         if embed_failure is not None:
             return embed_failure
@@ -1494,6 +1497,8 @@ class CollectionWriteTool(MemoryTool):
             entries, author=self._author, run_id=self._run_id, decisions=decisions
         )
         result = self._format_results(target, results)
+        if refused_note is not None:
+            result = result.model_copy(update={"message": f"{refused_note}\n{result.message}"})
         if note:
             return result.model_copy(update={"message": note + result.message})
         return result
@@ -1631,6 +1636,34 @@ class CollectionWriteTool(MemoryTool):
             message=_EMBED_WRITE_FAILURE_COLLECTION.format(keys=keys, collection=collection),
             success=False,
         )
+
+    def _split_dangling(
+        self, specs: list[CollectionEntrySpec]
+    ) -> tuple[list[CollectionEntrySpec], str | None]:
+        """Split the batch into writable specs and the refusal for the ones
+        citing a handle the run's table does not hold (#2736): a citation the
+        table can't expand would store as literal ``[n]`` text, so such an
+        entry is NOT written — one line per refused entry names the entry by
+        its key and carries ``HandleTable.dangling_note`` for the handles it
+        cited, and the rest of the batch lands unaffected."""
+        writable: list[CollectionEntrySpec] = []
+        lines: list[str] = []
+        for spec in specs:
+            numbers = self._handles.dangling(spec.content)
+            if numbers:
+                lines.append(
+                    f"'{spec.key}' was not written: {self._handles.dangling_note(numbers)}"
+                )
+            else:
+                writable.append(spec)
+        if not lines:
+            return specs, None
+        logger.warning(
+            "collection_write: refusing %d entry(ies) citing dangling handles: %s",
+            len(lines),
+            "; ".join(lines),
+        )
+        return writable, "\n".join(lines)
 
     async def _build_entry(self, spec: CollectionEntrySpec) -> EntryInput:
         return EntryInput(
