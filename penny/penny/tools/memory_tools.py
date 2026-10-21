@@ -86,6 +86,7 @@ from penny.tools.collection_instantiation import (
     has_schedule,
     parse_expires_at,
     parse_schedule,
+    render_autocreate_placeholder_note,
     render_creation_echo,
     render_expiry_update_line,
     render_inert_echo,
@@ -1240,6 +1241,10 @@ _WRITE_AUTOCREATE_NOTE = (
     "created (storage only, no job) and your entries went in.\n"
 )
 _AUTO_CREATED_DESCRIPTION = PennyConstants.AUTO_CREATED_DESCRIPTION_PREFIX + " '{key}'"
+# The auto-created collection's description is only the placeholder above, and the reply
+# says so (#2720).  The placeholder note itself renders from the ``collection_configure``
+# front door's module (``render_autocreate_placeholder_note``) — it names that lifecycle
+# tool, which only the chat surface carries, and auto-create happens only there.
 
 
 # The merge reply (#2715): the identity ladder matched this write to an existing
@@ -1533,7 +1538,10 @@ class CollectionWriteTool(MemoryTool):
             created_by_run_id=self._run_id,
         )
         logger.info("collection_write: auto-created collection '%s'", args.collection)
-        return args.collection, _WRITE_AUTOCREATE_NOTE.format(name=args.collection)
+        note = _WRITE_AUTOCREATE_NOTE.format(name=args.collection) + (
+            render_autocreate_placeholder_note(collection=args.collection, description=description)
+        )
+        return args.collection, note
 
     @staticmethod
     def _rules_match(asked: str, rows: list[MemoryRow]) -> str | None:
@@ -1905,6 +1913,15 @@ _SAME_JOB_TARGETED = (
 )
 
 
+# The stale-description note (#2720): a configure call that replaces a job's prompt but
+# leaves ``description`` alone re-shows the stored description beside the new prompt —
+# it may no longer say what the job is for.  Reported, never blocked: the model judges
+# whether the description still fits and sets it with the same call if not.
+_UNCHANGED_DESCRIPTION_NOTE = (
+    'Its description is unchanged: "{description}". This is what the store map shows for it.'
+)
+
+
 class CollectionUpdateTool(MemoryTool):
     """Update collection metadata, including a full replacement of its prompt
     (#2455 naive baseline; was #1620's skill re-render).
@@ -2115,11 +2132,29 @@ class CollectionUpdateTool(MemoryTool):
         # the lines it dropped.  Reported, never blocked — the model may rewrite a job.
         diff = render_prompt_replacement_diff(prompt_before, args.prompt)
         diff_block = f"\n{diff}" if diff is not None else ""
+        unchanged_note = self._unchanged_description_note(row, prompt_before, args)
         expiry_note = sentinel_expiry_note(args.expires_at, expires_at)
         return ToolResult(
-            message=f"{echo}{suffix}{diff_block}{self._no_schedule_note(memory)}{expiry_note}",
+            message=(
+                f"{echo}{suffix}{diff_block}{unchanged_note}"
+                f"{self._no_schedule_note(memory)}{expiry_note}"
+            ),
             mutated=True,
         )
+
+    @staticmethod
+    def _unchanged_description_note(
+        row: MemoryRow | None, prompt_before: str | None, args: CollectionUpdateArgs
+    ) -> str:
+        """The stale-description note (#2720), after the diff: a call that replaces a
+        job's EXISTING prompt but leaves ``description`` alone re-shows what the store
+        map holds for it — the model judges whether it still says what the job is for.
+        A call that also set ``description``, or adopted a first prompt, stays quiet."""
+        if args.description is not None or prompt_before is None:
+            return ""
+        if row is None or not row.description:
+            return ""
+        return "\n" + _UNCHANGED_DESCRIPTION_NOTE.format(description=row.description)
 
     async def _description_embedding(self, args: CollectionUpdateArgs) -> list[float] | None:
         """Re-embed the routing anchor only when the description changes; else ``None``
