@@ -833,11 +833,12 @@ async def test_send_response_attaches_matching_media(signal_server, test_config,
     await channel.close()
 
 
-def _text_envelope(config, sender: str, content: str) -> dict:
+def _text_envelope(config, sender: str, content: str, quote: dict | None = None) -> dict:
     """A plain Signal text-message envelope, built directly rather than pushed
     through the mock server's websocket — ``handle_message`` is the same entry
     point the receive loop calls with the parsed envelope (mirrors
-    ``_reaction_envelope`` in test_signal_reactions.py)."""
+    ``_reaction_envelope`` in test_signal_reactions.py). ``quote`` is the raw
+    Signal quote object (``id``/``text``) the reply quotes with."""
     ts = int(time.time() * 1000)
     return {
         "account": config.signal_number,
@@ -856,7 +857,7 @@ def _text_envelope(config, sender: str, content: str) -> dict:
                 "expiresInSeconds": 0,
                 "isExpirationUpdate": False,
                 "viewOnce": False,
-                "quote": None,
+                "quote": quote,
             },
         },
     }
@@ -975,5 +976,108 @@ async def test_handle_message_never_raises_even_when_the_account_also_fails(
     await channel.handle_message(_text_envelope(test_config, TEST_SENDER, "hi"))
 
     assert signal_server.outgoing_messages == []
+
+    await channel.close()
+
+
+@pytest.mark.asyncio
+async def test_send_response_stores_model_text_and_sends_converted(
+    signal_server, test_config, mock_llm
+):
+    """The conversation record keeps a reply as the model wrote it (#2722), and
+    the channel conversion applies only on the way out: a markdown reply sent
+    through the Signal channel is stored with its headings and bullets intact
+    (so the model's own formatting is visible in its history), while the text
+    on the wire is the Signal-converted form."""
+    from penny.constants import PennyConstants
+
+    db = Database(test_config.db_path)
+    channel, _ = _build_signal_world(test_config, db)
+
+    model_text = "# Server choices\n\n- **Pro**: fastest\n- Standard: fine\n"
+    await channel.send_response(TEST_SENDER, model_text, parent_id=None, author="penny")
+
+    conversation = db.messages.recent_conversation(5)
+    direction, stored = conversation[-1]
+    assert direction == PennyConstants.MessageDirection.OUTGOING
+    # The record holds the model's own markdown, byte for byte.
+    assert stored == model_text
+
+    # The wire carries the converted form: heading bolded, bullets Signal-style.
+    sent = signal_server.outgoing_messages[-1]
+    assert "**Server choices**" in sent["message"]
+    assert "• **Pro**: fastest" in sent["message"]
+    assert "#" not in sent["message"]
+    assert "- " not in sent["message"]
+
+    await channel.close()
+
+
+@pytest.mark.asyncio
+async def test_quote_reply_walks_the_quoted_thread_as_history(
+    signal_server, test_config, mock_llm, test_user_info, monkeypatch
+):
+    """A quote-reply to a formatted message walks the quoted thread as the
+    turn's history, not the recent window (#2722): the parent resolves by the
+    quoted message's own Signal timestamp (``Quote.id`` — the outgoing row's
+    ``external_id``), so ``ChatAgent.get_history`` receives the thread oldest
+    first — including the reply as the model wrote it. The quote text arriving
+    over the wire is the channel-converted form, which no longer content-matches
+    the stored model text; an unrelated autonomous send between the turns keeps
+    the recent-window fallback distinguishable from the thread."""
+    from datetime import datetime
+
+    from penny.agents.models import ControllerResponse, MessageRole
+    from penny.constants import PennyConstants
+
+    db = Database(test_config.db_path)
+    channel, message_agent = _build_signal_world(test_config, db)
+
+    answers = iter(
+        ["# Server choices\n\n- **Pro**: fastest\n- Standard: fine\n", "right — the Pro tier it is"]
+    )
+    run_history: list[list[tuple[str, str]]] = []
+
+    async def spy_run(*args, **kwargs):
+        run_history.append(kwargs.get("history") or [])
+        return ControllerResponse(answer=next(answers))
+
+    monkeypatch.setattr(message_agent, "run", spy_run)
+
+    # Turn 1: the user asks, Penny replies in markdown — thread-linked to the ask.
+    await channel.handle_message(
+        _text_envelope(test_config, TEST_SENDER, "what are the server tiers?")
+    )
+    # An unrelated autonomous send lands between the turns — the recent-window
+    # fallback would drag it into the history, the quoted thread must not.
+    await channel.send_message(TEST_SENDER, "heads-up: the backup finished")
+
+    rows = db.messages.get_messages_since(TEST_SENDER, since=datetime.min, limit=10)
+    sent_rows = [r for r in rows if r.direction == PennyConstants.MessageDirection.OUTGOING]
+    reply_row = next(r for r in sent_rows if r.content.startswith("# Server choices"))
+    assert reply_row.id is not None and reply_row.external_id is not None
+
+    # Turn 2: the user quote-replies the formatted message. The quote carries
+    # the converted form — content matching cannot resolve it — and the id
+    # that does.
+    quote = {
+        "id": int(reply_row.external_id),
+        "author": test_config.signal_number,
+        "text": "**Server choices**\n\n• **Pro**: fastest",
+    }
+    await channel.handle_message(_text_envelope(test_config, TEST_SENDER, "the Pro one", quote))
+
+    rows = db.messages.get_messages_since(TEST_SENDER, since=datetime.min, limit=10)
+    incoming = [r for r in rows if r.direction == PennyConstants.MessageDirection.INCOMING]
+    newest_incoming = max(incoming, key=lambda r: r.timestamp)
+    assert newest_incoming.parent_id == reply_row.id
+
+    # The turn's history is the quoted thread, oldest first, with the reply as
+    # the model wrote it — not the recent window (which would carry the
+    # autonomous notice).
+    assert run_history[-1] == [
+        (str(MessageRole.USER), "what are the server tiers?"),
+        (str(MessageRole.ASSISTANT), "# Server choices\n\n- **Pro**: fastest\n- Standard: fine"),
+    ]
 
     await channel.close()
