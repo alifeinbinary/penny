@@ -6,6 +6,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 from similarity.dedup import DedupStrategy, JobSide, is_embedding_duplicate, is_same_job
+from similarity.identity import (
+    KeyRule,
+    ShortlistSide,
+    key_parts,
+    normalise_key,
+    number_tokens,
+    pair_rule_verdict,
+    shortlist,
+)
 
 from penny.llm.embeddings import serialize_embedding
 from penny.llm.models import LlmResponseError
@@ -214,3 +223,169 @@ class TestIsSameJob:
         caught = sum(1 for pair in _DUPLICATE_PAIRS + _KNOWN_MISSES if _same(*pair))
         false_merges = sum(1 for pair in _DISTINCT_PAIRS if _same(*pair))
         assert (caught, false_merges) == (17, 0)
+
+
+# ── Entry-identity rules (#2715) ─────────────────────────────────────────────
+#
+# The deterministic steps of the identity ladder, over the 26 hand-labelled
+# contrived pairs the prototype measured: every pair the rules call SAME is one
+# thing named two ways, every pair they call DIFFERENT differs in a number
+# token, and everything else is left undecided for the shortlist + decision
+# model.  All fixtures are invented scenarios with real proper nouns.
+
+# Pairs whose KEYS normalise to the same entry — the rules must say SAME
+# whatever the content says (the value question is the caller's).
+_RULES_SAME_KEYS = [
+    ("Pink Floyd (band)", "pink floyd"),
+    ("The Beatles", "beatles"),
+    ("Texhnolyze (2003 anime)", "texhnolyze"),
+    ("Ryūtarō Nakamura", "ryutaro nakamura"),
+    ("chiaki j. konaka", "Chiaki J. Konaka"),
+    ("Into the Breach (video game)", "into the breach"),
+    ("analogue pocket price", "analogue_pocket_price"),
+    ("sea kayaking", "sea kayaking"),
+]
+
+# Pairs whose keys differ in a NUMBER token — the rules must say DIFFERENT even
+# when the content is identical: a date key is what makes two digest entries
+# different, and VI is not VII.
+_RULES_DIFFERENT_KEYS = [
+    ("2026-10-19", "2026-10-20"),
+    ("2026-10-21", "2026-10-20"),
+    ("final fantasy vi", "final fantasy vii"),
+    ("blade runner", "blade runner 2049"),
+    ("kino's journey", "kino's journey 2017"),
+    ("the big o", "the big o season 2"),
+    ("The Big O II (season 2)", "the big o"),
+]
+
+# Pairs the rules cannot settle — same neither way — left for the shortlist
+# and the decision model.
+_RULES_UNSETTLED_KEYS = [
+    ("genesis", "genesis p-orridge"),
+    ("pink floyd", "pink"),
+    ("portishead", "portugal. the man"),
+    ("ghost hound", "ghost in the shell"),
+    ("mei and the kittenbus", "my neighbor totoro"),
+    ("instant coffee", "decaf coffee"),
+    ("toronto raptors", "toronto blue jays"),
+    ("godspeed you! black emperor", "gybe"),
+    ("sea kayaking", "kayaking on the ocean"),
+    ("nyc", "New York City"),
+    ("dune", "dune messiah"),
+    ("olympia sm3", "olympia sm3 typewriter"),
+    ("nyc", "new york city metro area"),
+]
+
+
+class TestIdentityRules:
+    @pytest.mark.parametrize(("candidate", "existing"), _RULES_SAME_KEYS)
+    def test_keys_equal_after_normalising_are_the_same_entry(
+        self, candidate: str, existing: str
+    ) -> None:
+        assert pair_rule_verdict(candidate, existing, "x", "y") is KeyRule.SAME
+
+    @pytest.mark.parametrize(("candidate", "existing"), _RULES_DIFFERENT_KEYS)
+    def test_keys_differing_in_a_number_token_are_different_entries(
+        self, candidate: str, existing: str
+    ) -> None:
+        # Decisive even when the CONTENT is identical: two digest entries for
+        # consecutive days are different entries, not a re-observation.
+        assert pair_rule_verdict(candidate, existing, "same body", "same body") is (
+            KeyRule.DIFFERENT
+        )
+
+    @pytest.mark.parametrize(("candidate", "existing"), _RULES_UNSETTLED_KEYS)
+    def test_look_alike_pairs_are_left_to_the_decision_model(
+        self, candidate: str, existing: str
+    ) -> None:
+        assert pair_rule_verdict(candidate, existing, "x", "y") is None
+
+    @pytest.mark.parametrize(
+        ("candidate", "existing"),
+        [
+            ("Kino's Journey (2003)", "Kino's Journey (2017)"),
+            ("Dune (1984)", "Dune (2021)"),
+            ("Ghost in the Shell (1995)", "Ghost in the Shell (2007)"),
+        ],
+    )
+    def test_parentheticals_that_both_carry_numbers_and_differ_are_different_entries(
+        self, candidate: str, existing: str
+    ) -> None:
+        # The dangerous direction the parenthetical split exists for: the OLD
+        # number rule ran after the parenthetical was stripped, so two films
+        # keyed by year normalised to the same entry and MERGED.
+        assert pair_rule_verdict(candidate, existing, "x", "y") is KeyRule.DIFFERENT
+
+    def test_a_number_in_only_one_parenthetical_does_not_decide(self) -> None:
+        # A qualifier on one side is not an identity: the normalised comparison
+        # still runs and the pair is the same entry.
+        assert pair_rule_verdict("Texhnolyze", "Texhnolyze (2003 anime)", "x", "y") is (
+            KeyRule.SAME
+        )
+        assert pair_rule_verdict("Kino's Journey", "Kino's Journey (2003)", "x", "y") is (
+            KeyRule.SAME
+        )
+
+    def test_vitamin_b6_normalises_to_the_same_key(self) -> None:
+        # A digit inside a word is a main-part token, and equal on both sides.
+        assert pair_rule_verdict("vitamin-B6", "Vitamin B6", "x", "y") is KeyRule.SAME
+
+    def test_identical_content_settles_nothing(self) -> None:
+        # The repeat rule retired: identical content under different keys is the
+        # decision model's question, which sees both keys — a deterministic
+        # repeat would block two products that happen to share a price.
+        assert pair_rule_verdict("switch lite", "analogue pocket", "$219", "$219") is None
+
+    def test_the_number_token_rule_beats_identical_content(self) -> None:
+        # The production regression: a daily-digest job could not write
+        # 2026-10-21 because the store said it was the same entry as 2026-10-20.
+        assert (
+            pair_rule_verdict("2026-10-21", "2026-10-20", "same headlines", "same headlines")
+            is KeyRule.DIFFERENT
+        )
+
+    def test_normalise_key_strips_framing(self) -> None:
+        assert normalise_key("Pink Floyd (band)") == "pink floyd"
+        assert normalise_key("[dune]") == "dune"
+        assert normalise_key("(dune)") == "dune"  # a whole-paren key unwraps
+        assert normalise_key("The_Big-O") == "big o"
+        assert normalise_key("portugal. the man!") == "portugal the man"
+
+    def test_number_tokens_read_dates_and_roman_numerals(self) -> None:
+        assert number_tokens("2026-10-21") == ["10", "2026", "21"]
+        assert number_tokens("final fantasy vii") == ["vii"]
+        assert number_tokens("dune messiah") == []
+        # A token that merely looks Roman is not read as a number — the round
+        # trip back to the canonical form rejects it.
+        assert number_tokens("vim editor") == []
+        assert number_tokens("im planning") == []
+        # The main part and the parenthetical are read separately.
+        main, paren = key_parts("The Big O II (season 2)")
+        assert number_tokens(main) == ["ii"]
+        assert paren is not None and number_tokens(paren) == ["2"]
+
+    def test_key_parts_split_the_trailing_parenthetical(self) -> None:
+        assert key_parts("Kino's Journey (2003)") == ("kino s journey", "2003")
+        assert key_parts("Dune") == ("dune", None)
+        assert key_parts("[dune (2021)]") == ("dune", "2021")
+
+    def test_shortlist_ranks_by_the_best_surface_and_takes_the_top_k(self) -> None:
+        existing = [
+            ShortlistSide(key_vec=[1.0, 0.0], content_vec=[0.0, 1.0]),
+            ShortlistSide(key_vec=None, content_vec=[1.0, 0.0]),
+            ShortlistSide(key_vec=[0.0, 1.0], content_vec=None),
+            ShortlistSide(key_vec=None, content_vec=None),
+        ]
+        # The candidate's key matches side 0's key exactly; its content matches
+        # side 1's content — the best surface wins, ranking only.
+        ranked = shortlist([1.0, 0.0], [1.0, 0.0], existing, k=3)
+        assert ranked[0] == 0
+        # Side 3 has no vectors to rank on, so it never shortlists — and the
+        # shortlist is the top k of those that can rank, no cutoff.
+        assert len(ranked) == 3
+        assert 3 not in ranked
+
+    def test_shortlist_of_a_vectorless_candidate_is_empty(self) -> None:
+        existing = [ShortlistSide(key_vec=[1.0, 0.0], content_vec=None)]
+        assert shortlist(None, None, existing, k=3) == []
