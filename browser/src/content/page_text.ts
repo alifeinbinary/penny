@@ -76,6 +76,18 @@ const WEB_URL = /^https?:\/\//;
 const WHITESPACE_RUN = /\s+/g;
 const WHITESPACE = /\s+/;
 
+/** How far from the Unix epoch a timestamp may sit and still be one — a day
+ *  each way, because which side of midnight UTC the epoch lands on depends on
+ *  the timezone that rendered it. */
+const EPOCH_WINDOW_MS = 86_400_000;
+
+/** The date-time string format the language standard defines `Date.parse` for.
+ *  Only a string of this shape reaches `Date.parse` — the one parse every
+ *  engine agrees on; anything else is engine-specific territory (V8 parses a
+ *  bare `0` as the year 2000, SpiderMonkey refuses it), so it never decides. */
+const ISO_DATETIME =
+  /^\d{4}(-\d{2}(-\d{2})?)?(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+
 /** How a reading won — ARTICLE (Defuddle's own extraction) or LINK_LIST (the page's
  *  own index of other pages).  Wire-level name is `PageReading` (`protocol.ts`,
  *  mirrored by `constants.PageReading` on the Python side); this file's internal
@@ -111,6 +123,7 @@ export function readPage(doc: Document, url: string): { text: string; reading: R
  *  page under the user. */
 function readArticle(doc: Document, url: string): Reading | null {
   const clone = doc.cloneNode(true) as Document;
+  stripEpochTimestamps(clone);
   const result = new Defuddle(clone, { url }).parse();
   if (!result.content) return null;
   return {
@@ -164,7 +177,49 @@ function richer(article: Reading | null, index: Reading | null): Reading | null 
 function readableBody(doc: Document): HTMLElement {
   const body = doc.body.cloneNode(true) as HTMLElement;
   for (const element of body.querySelectorAll(NON_CONTENT_SELECTOR)) element.remove();
+  stripEpochTimestamps(body);
   return body;
+}
+
+/** Timestamps the page itself rendered as the Unix epoch are not the page's
+ *  content.  An empty or zero timestamp its server or script formatted comes
+ *  back as "January 1, 1970" (or "December 31, 1969") — measured on a national
+ *  news front page, where every story card is one anchor carrying
+ *  `<time class="timeStamp" dateTime="1970-01-01T00:00:00.001Z">January 1,
+ *  1970</time>` beside the headline, so the date glued itself onto every link
+ *  label.  `<time>` is the element HTML gives timestamps, so it is the only one
+ *  dropped, and it is decided machine-readably: by its raw `datetime`
+ *  attribute when it is the standardised ISO shape (the one form every engine
+ *  parses the same) — or, when the attribute is absent, a zero, or some other
+ *  shape, by the element's own text, which a `<time>` holds only its date of.
+ *  A `<span>` styled as a timestamp is left alone: its text is free text,
+ *  whose parsing is engine-specific, and reading every element's whole subtree
+ *  to find dates would be quadratic on a big page.  Runs on the clones; the
+ *  live page is untouched. */
+function stripEpochTimestamps(root: ParentNode): void {
+  for (const element of root.querySelectorAll("time")) {
+    if (isEpochTime(element)) element.remove();
+  }
+}
+
+/** Does this `<time>` contribute nothing but an epoch timestamp?  Empty
+ *  elements contribute nothing at all and are left alone. */
+function isEpochTime(element: Element): boolean {
+  const stamp = element.getAttribute("datetime");
+  // A machine-written ISO attribute decides outright; anything else — absent,
+  // zero, or not the standardised shape — falls through to the element's own
+  // text, which a `<time>` holds only its date of.
+  if (stamp !== null && ISO_DATETIME.test(stamp)) return isEpochInstant(Date.parse(stamp));
+  const text = (element.textContent ?? "").trim();
+  return text !== "" && isEpochInstant(Date.parse(text));
+}
+
+/** Is this parsed instant within a day of the Unix epoch?  A page renders its
+ *  own empty timestamp as the epoch in the viewer's timezone — "December 31,
+ *  1969" west of UTC, "January 1, 1970" east of it — so the window spans a day
+ *  each way. */
+function isEpochInstant(parsed: number): boolean {
+  return !Number.isNaN(parsed) && Math.abs(parsed) <= EPOCH_WINDOW_MS;
 }
 
 /** How many words of plain text an HTML fragment carries.  Parsed into an INERT
