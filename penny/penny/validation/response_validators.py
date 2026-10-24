@@ -16,7 +16,7 @@ Mapping from the old inline ``_check_response`` branches:
 
   XML branch              → ``XmlTagValidator``        (Retry)
   refusal branch          → ``RefusalValidator``       (Retry)
-  hallucinated-URL branch → ``HallucinatedUrlValidator`` (Retry)
+  hallucinated-URL branch → ``HallucinatedUrlValidator`` (Retry once, then Repair)
   strip-tool-calls-no-tools → ``HallucinatedToolCallRepair`` (Repair)
 
 **The call-shaped-text family is NOT here (#1839), and neither is the EMPTY draw
@@ -43,7 +43,9 @@ from typing import NamedTuple
 
 from penny.llm.models import LlmResponse
 from penny.llm.refusal import is_refusal
+from penny.responses import PennyResponse
 from penny.text_validity import strip_think_tags
+from penny.tools.link_handles import HandleTable
 from penny.validation.conditions import ConditionKey
 from penny.validation.outcomes import (
     LoopContext,
@@ -241,6 +243,53 @@ def find_hallucinated_urls(text: str, source_text: str) -> list[str]:
     return [url for url in urls if url not in source_text]
 
 
+def _drop_unsourced_urls(content: str, bad_urls: list[str]) -> str:
+    """``content`` with each of ``bad_urls`` removed — a markdown link's target
+    is dropped with its text kept; a bare address drops outright, the sentence
+    around it left as it was.  Same shape as :func:`clean_malformed_urls`, keyed
+    to "still unsourced after the retry" rather than "truncated" (#2721)."""
+    targets = set(bad_urls)
+
+    def fix_md_link(match: re.Match) -> str:
+        text, url = match.group(1), match.group(2)
+        return text if _address(url) in targets else match.group(0)
+
+    content = _MARKDOWN_LINK_URL_PATTERN.sub(fix_md_link, content)
+    for address in reversed(_addresses(content)):
+        url = content[address.start : address.end]
+        if url in targets:
+            content = f"{content[: address.start]}{content[address.end :]}"
+    return content
+
+
+def _drop_unsourced_link(
+    response: LlmResponse, handles: HandleTable, dangling: list[int], bad_urls: list[str]
+) -> LlmResponse:
+    """The repair once the retry is spent and the second draft still carries the
+    defect (#2721): every still-bad link removed — a dangling handle citation
+    AND a raw unsourced URL can both be present, so both are dropped, never
+    just the first one found — and a plain line telling the user one was left
+    out, because it never reaches them silently (visible degradation over
+    silent success, docs/principles.md).  The citation grammar is
+    ``HandleTable``'s own (``drop_citations``, beside its ``dangling()``); only
+    the raw-URL removal is this module's, since a plain unsourced address is
+    not a handle concern.  Logged the same way the chain's other repair
+    (``HallucinatedToolCallRepair``) records what it did."""
+    content = response.message.content
+    if dangling:
+        content = handles.drop_citations(content, dangling)
+        logger.warning("Dropped dangling link handle(s) after retry: %s", dangling)
+    if bad_urls:
+        content = _drop_unsourced_urls(content, bad_urls)
+        logger.warning(
+            "Dropped unsourced URL(s) after retry: %s",
+            ", ".join(url[:80] for url in bad_urls),
+        )
+    repaired = response.model_copy(deep=True)
+    repaired.message.content = f"{content}\n\n{PennyResponse.LINK_DROPPED_NOTICE}"
+    return repaired
+
+
 # ── Response-level validators (chat + collector) ─────────────────────────────
 
 
@@ -280,28 +329,35 @@ class HallucinatedUrlValidator:
     cannot usually see a miscounted handle in its own draft (the number reads as
     real to it), so the re-draw is shown the draft plus the note.  Links that came
     through handles never reach the raw-URL check: the model cites ``[n]``, not an
-    address, so the raw-URL branch only fires for a URL still typed outright."""
+    address, so the raw-URL branch only fires for a URL still typed outright.
+
+    The retry is spent after one attempt (#2721): when the SECOND draft still
+    carries a dangling handle or an unsourced URL, it no longer reaches the user
+    silently — the still-bad link is dropped (a ``Repair``, not another re-draw)
+    and the message says plainly that one was left out."""
 
     def check(self, response: LlmResponse, ctx: LoopContext) -> ValidationOutcome:
-        if ConditionKey.HALLUCINATED_URLS in ctx.retried:
-            return Proceed(response=response)
         effective_content, _ = strip_think_tags(response.content.strip())
         if not (ctx.source_text and effective_content):
             return Proceed(response=response)
-        if ctx.handles:
-            dangling = ctx.handles.dangling(effective_content)
+        # Both are computed every time — a draft can carry a dangling handle AND a
+        # separately typed raw URL at once, and skipping one check because the other
+        # already fired would let that second defect through unflagged (#2721 review).
+        dangling = ctx.handles.dangling(effective_content) if ctx.handles else []
+        bad_urls = find_hallucinated_urls(effective_content, ctx.source_text)
+        if not dangling and not bad_urls:
+            return Proceed(response=response)
+        if ConditionKey.HALLUCINATED_URLS not in ctx.retried:
             if dangling:
                 note = ctx.handles.dangling_note(dangling)
                 logger.warning("Dangling link handle(s): %s", note)
                 return Retry(condition=ConditionKey.HALLUCINATED_URLS, note=note)
-        bad_urls = find_hallucinated_urls(effective_content, ctx.source_text)
-        if bad_urls:
             logger.warning(
                 "Hallucinated URL(s): %s",
                 ", ".join(url[:80] for url in bad_urls),
             )
             return Retry(condition=ConditionKey.HALLUCINATED_URLS)
-        return Proceed(response=response)
+        return Repair(response=_drop_unsourced_link(response, ctx.handles, dangling, bad_urls))
 
 
 class HallucinatedToolCallRepair:
