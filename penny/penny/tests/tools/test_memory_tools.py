@@ -404,7 +404,9 @@ class TestScheduleGrammar:
         schedule = "FREQ=DAILY;UNTIL=20261019T000000Z"
         anchor = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
         assert next_occurrence(schedule, anchor, None) == datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
-        assert describe_schedule(_row_with_schedule(schedule)) == f"every day (rule: `{schedule}`)"
+        assert describe_schedule(_row_with_schedule(schedule)) == (
+            f"every day (rule: `{schedule}`), next run Thursday, July 02, 2026 at 09:00 AM UTC"
+        )
 
     def test_the_taught_examples_say_whose_clock_each_time_is_on(self):
         """The grammar the model is taught, asserted WHOLE (#1932).
@@ -432,6 +434,55 @@ class TestScheduleGrammar:
             parse_schedule("'FREQ=HOURLY;'")
         corrected = str(raised.value).split("did you mean '")[1].split("'?")[0]
         assert parse_schedule(corrected).rule == "FREQ=HOURLY"
+
+
+class TestNextOccurrenceMinuteAnchoring:
+    """A rule stating ``BYHOUR`` with no ``BYMINUTE`` of its own means ON THE HOUR
+    (#2775) — the anchor's minute (the moment the collection happened to be created) is
+    not a minute the rule stated, so it is zeroed exactly like its seconds always were.
+    The live failure: a "7 PM" job (``FREQ=DAILY;BYHOUR=19``) created at 15:59 fired at
+    19:59 every day, because the un-stated minute was inherited from the anchor."""
+
+    def test_byhour_without_byminute_fires_on_the_hour(self):
+        created = datetime(2026, 10, 19, 15, 59, tzinfo=UTC)
+        assert next_occurrence("FREQ=DAILY;BYHOUR=19", created, None) == datetime(
+            2026, 10, 19, 19, 0, tzinfo=UTC
+        )
+
+    def test_byhour_with_its_own_byminute_is_unaffected(self):
+        """A rule naming its own ``BYMINUTE`` already overrides whatever the anchor
+        carries, so the minute rule above changes nothing for it."""
+        created = datetime(2026, 10, 19, 15, 59, tzinfo=UTC)
+        assert next_occurrence("FREQ=DAILY;BYHOUR=19;BYMINUTE=30", created, None) == datetime(
+            2026, 10, 19, 19, 30, tzinfo=UTC
+        )
+
+    def test_explicit_dtstart_keeps_its_own_minute(self):
+        """A rule with its own ``DTSTART`` anchors on THAT line, never on the default
+        anchor computed here — so its stated minute survives even though the rule also
+        states ``BYHOUR`` with no ``BYMINUTE`` of its own."""
+        created = datetime(2026, 10, 19, 15, 59, tzinfo=UTC)
+        schedule = "DTSTART:20261019T093000Z\nFREQ=DAILY;BYHOUR=19"
+        assert next_occurrence(schedule, created, None) == datetime(
+            2026, 10, 19, 19, 30, tzinfo=UTC
+        )
+
+    def test_byhour_only_schedule_stays_on_the_hour_across_a_dst_boundary(self):
+        """#2775 holds on both sides of a DST boundary too — the hour is read on the
+        user's WALL clock (#1932), which is a different UTC offset before and after the
+        2026-11-01 fall-back in America/Toronto, while the minute stays zero throughout.
+        ``after`` is passed explicitly on both sides (rather than relying on the rule's
+        own first occurrence) so each assertion names exactly the occurrence it means."""
+        created = datetime(2026, 10, 19, 8, 41, tzinfo=UTC)  # well before the boundary
+        zone = "America/Toronto"
+        # Before the fall-back (Oct 31): 19:00 local (EDT, UTC-4) is 23:00 UTC.
+        assert next_occurrence(
+            "FREQ=DAILY;BYHOUR=19", created, zone, after=datetime(2026, 10, 30, 23, 0, tzinfo=UTC)
+        ) == datetime(2026, 10, 31, 23, 0, tzinfo=UTC)
+        # After the fall-back (Nov 1): 19:00 local (EST, UTC-5) is 00:00 UTC the next day.
+        assert next_occurrence(
+            "FREQ=DAILY;BYHOUR=19", created, zone, after=datetime(2026, 10, 31, 23, 0, tzinfo=UTC)
+        ) == datetime(2026, 11, 2, 0, 0, tzinfo=UTC)
 
 
 class TestExpiresAtGrammar:
@@ -649,10 +700,20 @@ class TestScheduleRoundTrip:
         assert db.memories.get("weekend-watch") is None
 
 
-def _row_with_schedule(schedule: str | None) -> MemoryRow:
+# A fixed creation moment, so the next-run clause (#2775) that ``describe_schedule``
+# now appends computes a deterministic FIRST occurrence — the exact value never
+# matters to what a case is testing, only that it doesn't move with the wall clock.
+_SCHEDULE_ROW_CREATED = datetime(2026, 7, 2, 9, 0, tzinfo=UTC)
+
+
+def _row_with_schedule(
+    schedule: str | None, created_at: datetime = _SCHEDULE_ROW_CREATED
+) -> MemoryRow:
     """A bare row carrying only a schedule — ``describe_schedule``/``has_schedule`` read
-    nothing else off it."""
-    return MemoryRow(name="x", type="collection", description="d", schedule=schedule)
+    nothing else off it beside the fixed ``created_at`` its next-run clause anchors on."""
+    return MemoryRow(
+        name="x", type="collection", description="d", schedule=schedule, created_at=created_at
+    )
 
 
 class TestDescribeSchedule:
@@ -660,34 +721,54 @@ class TestDescribeSchedule:
     (#2425): the fix for a raw ``DTSTART``/RRULE reaching the model and a reply copying
     it verbatim.  ``describe_schedule`` is built from the rule's own parts rather than a
     lookup of the taught shapes, so this also covers combinations the grammar allows but
-    nothing taught (e.g. a comma list of BYHOUR values, COUNT > 1 with no DTSTART)."""
+    nothing taught (e.g. a comma list of BYHOUR values, COUNT > 1 with no DTSTART).  Every
+    case also carries the engine's own next-run clause (#2775, ``_row_with_schedule``'s
+    fixed ``created_at``), so a rendered schedule and what the engine will actually do
+    next can never silently drift apart."""
 
     @pytest.mark.parametrize(
         "schedule, words",
         [
-            ("FREQ=HOURLY", "every hour (rule: `FREQ=HOURLY`)"),
+            (
+                "FREQ=HOURLY",
+                "every hour (rule: `FREQ=HOURLY`), "
+                "next run Thursday, July 02, 2026 at 09:00 AM UTC",
+            ),
             (
                 "FREQ=MINUTELY;INTERVAL=90",
-                "every 90 minutes (rule: `FREQ=MINUTELY;INTERVAL=90`)",
+                "every 90 minutes (rule: `FREQ=MINUTELY;INTERVAL=90`), "
+                "next run Thursday, July 02, 2026 at 09:00 AM UTC",
             ),
-            ("FREQ=DAILY;BYHOUR=8", "every day at 08:00 AM (rule: `FREQ=DAILY;BYHOUR=8`)"),
+            (
+                "FREQ=DAILY;BYHOUR=8",
+                "every day at 08:00 AM (rule: `FREQ=DAILY;BYHOUR=8`), "
+                "next run Friday, July 03, 2026 at 08:00 AM UTC",
+            ),
             (
                 "FREQ=DAILY;BYHOUR=8,20",
-                "every day at 08:00 AM and 08:00 PM (rule: `FREQ=DAILY;BYHOUR=8,20`)",
+                "every day at 08:00 AM and 08:00 PM (rule: `FREQ=DAILY;BYHOUR=8,20`), "
+                "next run Thursday, July 02, 2026 at 08:00 PM UTC",
             ),
             (
                 "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9",
-                "weekdays at 09:00 AM (rule: `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9`)",
+                "weekdays at 09:00 AM (rule: `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9`), "
+                "next run Thursday, July 02, 2026 at 09:00 AM UTC",
             ),
             (
                 "FREQ=WEEKLY;BYDAY=SA,SU",
-                "weekends (rule: `FREQ=WEEKLY;BYDAY=SA,SU`)",
+                "weekends (rule: `FREQ=WEEKLY;BYDAY=SA,SU`), "
+                "next run Saturday, July 04, 2026 at 09:00 AM UTC",
             ),
             (
                 "FREQ=WEEKLY;BYDAY=MO,WE,FR",
-                "Monday, Wednesday, and Friday (rule: `FREQ=WEEKLY;BYDAY=MO,WE,FR`)",
+                "Monday, Wednesday, and Friday (rule: `FREQ=WEEKLY;BYDAY=MO,WE,FR`), "
+                "next run Friday, July 03, 2026 at 09:00 AM UTC",
             ),
-            ("FREQ=DAILY;COUNT=3", "every day, 3 times (rule: `FREQ=DAILY;COUNT=3`)"),
+            (
+                "FREQ=DAILY;COUNT=3",
+                "every day, 3 times (rule: `FREQ=DAILY;COUNT=3`), "
+                "next run Thursday, July 02, 2026 at 09:00 AM UTC",
+            ),
         ],
     )
     def test_taught_and_untaught_shapes_read_as_words(self, schedule, words):
@@ -701,7 +782,8 @@ class TestDescribeSchedule:
         words = describe_schedule(_row_with_schedule(schedule), "America/Los_Angeles")
         assert words == (
             "starting Wednesday, October 14, 2026 at 02:00 PM PDT, then every hour "
-            "(rule: `DTSTART:20261014T210000Z FREQ=HOURLY`)"
+            "(rule: `DTSTART:20261014T210000Z FREQ=HOURLY`), "
+            "next run Wednesday, October 14, 2026 at 02:00 PM PDT"
         )
 
     def test_a_floating_dtstart_is_read_as_the_users_own_wall_clock(self):
@@ -711,7 +793,8 @@ class TestDescribeSchedule:
         words = describe_schedule(_row_with_schedule(schedule), "America/Los_Angeles")
         assert words == (
             "starting Wednesday, October 14, 2026 at 02:00 PM PDT, then every hour "
-            "(rule: `DTSTART:20261014T140000 FREQ=HOURLY`)"
+            "(rule: `DTSTART:20261014T140000 FREQ=HOURLY`), "
+            "next run Wednesday, October 14, 2026 at 02:00 PM PDT"
         )
 
     def test_a_one_shot_dtstart_retires_instead_of_restating_its_cadence(self):
@@ -721,13 +804,36 @@ class TestDescribeSchedule:
         words = describe_schedule(_row_with_schedule(schedule))
         assert words == (
             "once, at Friday, December 25, 2026 at 09:00 AM UTC, then it retires "
-            "(rule: `DTSTART:20261225T090000Z FREQ=DAILY;COUNT=1`)"
+            "(rule: `DTSTART:20261225T090000Z FREQ=DAILY;COUNT=1`), "
+            "next run Friday, December 25, 2026 at 09:00 AM UTC"
         )
 
     def test_no_schedule_is_empty_for_the_clause_and_none_for_the_field(self):
         row = _row_with_schedule(None)
         assert describe_schedule(row) == ""
         assert describe_schedule_field(row) == "none"
+
+    def test_an_exhausted_schedule_states_no_next_run(self):
+        """A spent ``COUNT=`` (the only shape a bare ``describe_schedule`` call can
+        reach, since an exhausted collection is otherwise archived before anything
+        renders it, #2775) has no occurrence left — the engine's own next-run clause
+        is honestly absent rather than inventing or repeating a stale one."""
+        row = _row_with_schedule(
+            "FREQ=DAILY;COUNT=1", created_at=datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        )
+        row.last_collected_at = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        assert describe_schedule(row) == "once, then it retires (rule: `FREQ=DAILY;COUNT=1`)"
+
+    def test_an_archived_rows_schedule_states_no_next_run(self):
+        """``memory_get`` (``describe_schedule_field``) renders a schedule's clause on
+        every row regardless of lifecycle, unlike the self-state job line, which never
+        reaches an archived row's cadence at all (#2775). An archived row has no next
+        run whatever the rule alone would compute — it may have been archived for a
+        reason the rule knows nothing about, not only a spent quota — so the next-run
+        clause stays honestly absent rather than showing a stale one."""
+        row = _row_with_schedule("FREQ=HOURLY")
+        row.archived = True
+        assert describe_schedule(row) == "every hour (rule: `FREQ=HOURLY`)"
 
     def test_the_end_condition_is_not_restated_inside_the_words(self):
         """``UNTIL=`` is already lifted onto ``expires_at`` and rendered on its own
@@ -737,7 +843,9 @@ class TestDescribeSchedule:
         from before that refusal existed."""
         schedule = "FREQ=DAILY;UNTIL=20260901T000000Z"
         words = describe_schedule(_row_with_schedule(schedule))
-        assert words == f"every day (rule: `{schedule}`)"
+        assert words == (
+            f"every day (rule: `{schedule}`), next run Thursday, July 02, 2026 at 09:00 AM UTC"
+        )
 
 
 class TestCreateAndList:
@@ -1193,6 +1301,15 @@ class TestCollectionUpdateScheduleAtApply:
         stickiness the rule exists to end would survive it.  The removal is recorded as a
         change like any other, so the row does not quietly differ from the ledger."""
         _seed_collection(db, name="watch", schedule="FREQ=HOURLY")
+        # Pin created_at to the fixed moment `_row_with_schedule` uses (rather than the
+        # fixture's "now") so the next-run clause (#2775) below is an exact literal, not
+        # a tautological re-call of `describe_schedule` on whatever it happens to return.
+        with Session(db.engine) as session:
+            row = session.get(MemoryRow, "watch")
+            assert row is not None
+            row.created_at = _SCHEDULE_ROW_CREATED
+            session.add(row)
+            session.commit()
         db.memories.update_collection_metadata(
             "watch", expires_at=datetime(2099, 12, 31, tzinfo=UTC)
         )
@@ -1208,7 +1325,8 @@ class TestCollectionUpdateScheduleAtApply:
         # that tells the turn what became of the value it passed.
         assert result.message == (
             "Updated collection 'watch':\n"
-            "  schedule: every hour (rule: `FREQ=HOURLY`)\n"
+            "  schedule: every hour (rule: `FREQ=HOURLY`), "
+            "next run Thursday, July 02, 2026 at 09:00 AM UTC\n"
             "  notify: False\n"
             "  expires: was 2099-12-31 00:00 UTC → now never\n"
             "  description: x\n"
