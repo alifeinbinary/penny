@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+import websockets
 
 from penny.agents.base import AgentProgressEvent
 from penny.channels.ios.apns import ApnsClient, ApnsConfig, ApnsEnvironment, ApnsError
@@ -17,6 +18,7 @@ from penny.channels.ios.channel import (
     TEST_PUSH_MESSAGE,
     IosChannel,
     IosConnectionInfo,
+    _push_preview,
 )
 from penny.channels.ios.models import (
     IOS_MSG_TYPE_ACK,
@@ -85,6 +87,84 @@ async def _ios_admin_request(channel: IosChannel, payload: dict) -> dict:
         "ios-keychain-id",
     )
     return ws.sent[0]
+
+
+async def _settle_broadcasts(before: set[asyncio.Task[Any]]) -> None:
+    """Retrieve every scheduled result so a detached failure fails the test."""
+    tasks = asyncio.all_tasks() - before
+    results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2.0)
+    assert all(result is None for result in results), results
+
+
+@pytest.mark.asyncio
+async def test_database_updates_survive_a_disconnected_ios_client(db, caplog):
+    channel = _make_channel(db)
+    close = websockets.frames.Close(1001, "")
+    dead = MagicMock(send=AsyncMock(side_effect=websockets.ConnectionClosedOK(close, close, True)))
+    live = FakeWs()
+    channel._connections["closed"] = IosConnectionInfo(ws=dead, device_id=1, identifier="closed")
+    channel._connections["live"] = IosConnectionInfo(
+        ws=cast(Any, live), device_id=2, identifier="live"
+    )
+
+    with caplog.at_level("INFO", logger="penny.channels.ios.channel"):
+        before = asyncio.all_tasks()
+        db.messages.log_prompt(
+            model="test-model", messages=[], response={}, agent_name="chat", run_id="run-1"
+        )
+        db.messages.set_run_outcome("run-1", "worked", "wrote 2 entries")
+        db.memories.create_collection("aurora-notes", "notes about the aurora")
+        await _settle_broadcasts(before)
+
+    assert [message["type"] for message in live.sent] == [
+        "prompt_log_update",
+        "run_outcome_update",
+        "memory_changed",
+    ]
+    assert dead.send.await_count == 3
+    assert "closed before" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_ios_broadcast_keeps_null_memory_name(db):
+    channel = _make_channel(db)
+    live = FakeWs()
+    channel._connections["live"] = IosConnectionInfo(
+        ws=cast(Any, live), device_id=1, identifier="live"
+    )
+
+    before = asyncio.all_tasks()
+    channel._on_memory_changed(None)
+    await _settle_broadcasts(before)
+
+    assert live.sent == [{"type": "memory_changed", "name": None}]
+
+
+def test_ios_broadcast_without_clients_needs_no_event_loop(db):
+    channel = _make_channel(db)
+
+    channel._on_prompt_logged({"run_id": "run-1"})
+    channel._on_run_outcome_set("run-1", "worked", "wrote 2 entries")
+    channel._on_memory_changed(None)
+
+
+@pytest.mark.asyncio
+async def test_ios_broadcast_logs_unexpected_send_failure(db, caplog):
+    channel = _make_channel(db)
+    broken = MagicMock(send=AsyncMock(side_effect=RuntimeError("send failed")))
+    live = FakeWs()
+    channel._connections["broken"] = IosConnectionInfo(ws=broken, device_id=1, identifier="broken")
+    channel._connections["live"] = IosConnectionInfo(
+        ws=cast(Any, live), device_id=2, identifier="live"
+    )
+
+    before = asyncio.all_tasks()
+    channel._on_memory_changed(None)
+    await _settle_broadcasts(before)
+
+    assert live.sent == [{"type": "memory_changed", "name": None}]
+    assert "Broadcasting a memory_changed update to iOS clients failed" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -343,6 +423,68 @@ async def test_admin_config_request_returns_runtime_params(db):
     )
 
 
+@pytest.mark.parametrize(
+    ("message", "limit", "expected"),
+    [
+        (
+            "First sentence. Second sentence. Third sentence.",
+            32,
+            "First sentence. Second sentence.",
+        ),
+        ("First sentence. Second sentence.", 31, "First sentence."),
+        ("First sentence. Second sentence.", 32, "First sentence. Second sentence."),
+        ("Short. " + "x" * 40 + ". Last.", 20, "Short."),
+        (
+            'She said "Book today." Seats are limited. More details.',
+            41,
+            'She said "Book today." Seats are limited.',
+        ),
+        (
+            "**First sentence.**\n[Second sentence.](https://example.com) Third sentence.",
+            32,
+            "First sentence. Second sentence.",
+        ),
+        ("A complete sentence. An unfinished tail", 25, "A complete sentence."),
+        ("A sentence without punctuation", 40, "A sentence without punctuation"),
+        ("x" * 451 + ".", 450, "x" * 447 + "..."),
+        ("unpunctuated long text", 10, "unpunct..."),
+        ("long text", 1, "."),
+        ("long text", 2, ".."),
+        ("long text", 3, "..."),
+        ("\n  ", 450, ""),
+    ],
+)
+def test_push_preview_fills_limit_with_complete_sentences(message, limit, expected):
+    title, body = _push_preview(message, limit)
+
+    assert title == PUSH_GREETING_TITLE
+    assert body == expected
+    assert len(body) <= limit
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_push_preview_default_is_450_characters(db, configured):
+    channel = _make_channel(db)
+    if configured:
+        from penny.config_params import RuntimeParams
+
+        channel._config = MagicMock(runtime=RuntimeParams())
+    device = db.devices.register("ios", "preview-test-device", "iPhone")
+    assert device.id is not None
+    first = "a" * 199 + "."
+    second = "b" * 248 + "."
+    item = channel._enqueue_ios_outbox_item(
+        device_id=device.id,
+        message=f"{first} {second} Another sentence.",
+        attachments=None,
+        source_name="flight-deals",
+    )
+
+    assert channel._push_preview_limit() == 450
+    assert item.push_summary == f"{first} {second}"
+    assert len(item.push_summary) == 450
+
+
 @pytest.mark.asyncio
 async def test_send_raw_queues_outbox_and_sends_push_preview_when_disconnected(db, caplog):
     apns = FakeApns()
@@ -386,7 +528,9 @@ async def test_send_raw_queues_outbox_and_sends_push_preview_when_disconnected(d
     assert apns.sent[0]["device_token"] == "apns-token"
     assert apns.sent[0]["outbox_id"] == external_id
     assert apns.sent[0]["title"] == PUSH_GREETING_TITLE
-    assert apns.sent[0]["body"] == "Found a fare drop."
+    assert apns.sent[0]["body"] == (
+        "Found a fare drop. Vancouver to Tokyo is cheaper today. https://example.com"
+    )
     assert apns.sent[0]["badge"] == 1
     assert apns.sent[0]["environment"] == "sandbox"
 
