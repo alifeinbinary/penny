@@ -17,6 +17,7 @@ import httpx
 import openai
 
 from penny.constants import PennyConstants
+from penny.llm import raw_template
 from penny.llm.call_link import CallLink
 
 if TYPE_CHECKING:
@@ -39,7 +40,10 @@ from penny.llm.models import (
     LlmToolCall,
     LlmToolCallFunction,
     LlmToolParseError,
+    PromptTransport,
     ProviderPin,
+    RawFaithfulnessOutcome,
+    RawFaithfulnessResult,
     UsageTiming,
     fault_for_status,
     usage_timing_from_response,
@@ -222,6 +226,12 @@ def _extract_model_ids(payload: Any) -> list[str]:
     return ids
 
 
+# Either wire shape's own raw SDK response, by whichever transport
+# (#2829) served the call — a chat completion, or a raw completions
+# response, read from the plain OpenAI SDK, never a bespoke client.
+_RawCompletion = openai.types.chat.ChatCompletion | openai.types.completion.Completion
+
+
 class _ChatAttemptResult(NamedTuple):
     """One chat attempt's own outcome: the raw completion the attempt drew, and
     its parsed response — or ``None`` for ``response`` when the completion
@@ -230,7 +240,7 @@ class _ChatAttemptResult(NamedTuple):
     draw and a 200-with-no-completion draw are the same return type.
     """
 
-    raw: openai.types.chat.ChatCompletion
+    raw: _RawCompletion
     response: LlmResponse | None
 
 
@@ -284,7 +294,33 @@ class LlmClient:
 
         self.client = openai.AsyncOpenAI(**client_kwargs)
 
+        # Structural transport dispatch (#2829): a model with a vendored chat
+        # template renders it and calls raw completions; any other model uses
+        # the chat-completions API, as before.  Mutable only through
+        # ``disable_raw_template_transport`` — the startup preflight's
+        # raw-faithfulness check names the one case this flips at runtime.
+        self._raw_template_enabled = raw_template.has_vendored_template(model)
+
         logger.info("Initialized LLM client: url=%s, model=%s", api_url, model)
+
+    def disable_raw_template_transport(self, reason: str) -> None:
+        """Fall back this client to the chat transport for the rest of its life.
+
+        Called by the startup preflight when the raw-faithfulness check finds
+        this deployment's endpoint does not serve the model's raw completions
+        faithfully (a chat-wrapping provider pinned to a model this client
+        would otherwise route raw) — a named degraded mode, never a silent
+        one (``docs/principles.md``'s visible-degradation principle).
+        """
+        self._raw_template_enabled = False
+        logger.warning("Raw template transport disabled for %s: %s", self.model, reason)
+
+    @property
+    def raw_template_enabled(self) -> bool:
+        """Whether this client currently routes this model through the
+        raw-template transport (#2829) — read by the startup preflight to
+        decide whether the raw-faithfulness check applies at all."""
+        return self._raw_template_enabled
 
     # ── Summary ──────────────────────────────────────────────────────────
 
@@ -350,13 +386,18 @@ class LlmClient:
             call_link, agent_name, prompt_type, run_target
         )
         start = time.time()
+        # Decided once, structurally, for the whole call (#2829) — never
+        # re-derived per attempt, and named on BOTH the success and failure
+        # log rows, so a reader can tell which wire shape a raised/cancelled
+        # call was even attempting.
+        transport = self._resolve_transport(messages, format)
         # The one hand-off (#2563): typed history becomes the internal dict shape
         # here, once, before the retry loop and the prompt log — both unchanged,
         # both still dealing purely in dicts, exactly as before this call's entry.
         messages_snapshot = [message.to_log_dict() for message in messages]
         try:
             response, raw = await self._chat_attempts(
-                messages_snapshot, tools, format, token_budget, thinking_enabled
+                messages_snapshot, tools, format, token_budget, thinking_enabled, transport
             )
         except asyncio.CancelledError:
             self._log_failed_call(
@@ -369,6 +410,7 @@ class LlmClient:
                 run_target,
                 parent_run_id,
                 parent_tool_call_id,
+                transport,
                 CallOutcome.CANCELLED,
             )
             raise
@@ -386,6 +428,7 @@ class LlmClient:
                 run_target,
                 parent_run_id,
                 parent_tool_call_id,
+                transport,
                 outcome,
                 error=error,
             )
@@ -403,7 +446,27 @@ class LlmClient:
             run_target,
             parent_run_id,
             parent_tool_call_id,
+            transport,
         )
+
+    def _resolve_transport(
+        self, messages: list[LlmMessage], format: dict | str | None
+    ) -> PromptTransport:
+        """Which wire shape this call uses — decided once, before the retry
+        loop, from facts that never change between attempts: the model's own
+        identity, and whether THIS call carries an image or a structured
+        ``format`` (#2829).  Neither has a raw-completions equivalent — an
+        image needs the provider's own vision processor, and ``format`` is an
+        OpenAI-API-level field gemma's raw template has no construct for — so
+        both force the chat transport regardless of the model.
+        """
+        if not self._raw_template_enabled:
+            return PromptTransport.CHAT
+        if format is not None:
+            return PromptTransport.CHAT
+        if any(message.images for message in messages):
+            return PromptTransport.CHAT
+        return PromptTransport.RAW_TEMPLATE
 
     # ── Chat: call setup and logging ────────────────────────────────────
 
@@ -444,6 +507,7 @@ class LlmClient:
         run_target: str | None,
         parent_run_id: str | None,
         parent_tool_call_id: str | None,
+        transport: PromptTransport,
         outcome: CallOutcome,
         *,
         error: Exception | None = None,
@@ -455,6 +519,7 @@ class LlmClient:
         self._log_call(
             messages_snapshot,
             None,
+            None,
             tools,
             None,
             self._elapsed_ms(start),
@@ -464,6 +529,7 @@ class LlmClient:
             run_target,
             parent_run_id,
             parent_tool_call_id,
+            transport,
             outcome,
             error=error,
         )
@@ -471,7 +537,7 @@ class LlmClient:
     def _log_successful_call(
         self,
         response: LlmResponse,
-        raw: openai.types.chat.ChatCompletion,
+        raw: _RawCompletion,
         messages_snapshot: list[dict],
         tools: list[dict] | None,
         start: float,
@@ -481,6 +547,7 @@ class LlmClient:
         run_target: str | None,
         parent_run_id: str | None,
         parent_tool_call_id: str | None,
+        transport: PromptTransport,
     ) -> LlmResponse:
         """Log the response and this call's ONE completed ``promptlog`` row
         (#2355 part A), then hand the response back to ``chat()``'s caller.
@@ -493,6 +560,7 @@ class LlmClient:
         response.prompt_log_id = self._log_call(
             messages_snapshot,
             raw,
+            response,
             tools,
             thinking,
             self._elapsed_ms(start),
@@ -502,6 +570,7 @@ class LlmClient:
             run_target,
             parent_run_id,
             parent_tool_call_id,
+            transport,
             CallOutcome.COMPLETED,
         )
         return response
@@ -546,9 +615,10 @@ class LlmClient:
         messages: list[dict],
         tools: list[dict] | None,
         format: dict | str | None,
-        token_budget: int | None = None,
-        thinking_enabled: bool = True,
-    ) -> tuple[LlmResponse, openai.types.chat.ChatCompletion]:
+        token_budget: int | None,
+        thinking_enabled: bool,
+        transport: PromptTransport,
+    ) -> tuple[LlmResponse, _RawCompletion]:
         """The retry loop over individual network attempts.
 
         Unchanged in substance from before #2355 — each attempt's own outcome
@@ -564,7 +634,7 @@ class LlmClient:
         for attempt in range(self.max_retries):
             try:
                 result = await self._attempt_chat_request(
-                    messages, tools, format, token_budget, thinking_enabled, attempt
+                    messages, tools, format, token_budget, thinking_enabled, attempt, transport
                 )
             except LlmError:
                 raise
@@ -594,8 +664,9 @@ class LlmClient:
         token_budget: int | None,
         thinking_enabled: bool,
         attempt: int,
+        transport: PromptTransport,
     ) -> _ChatAttemptResult:
-        """Send and parse ONE chat request.
+        """Send and parse ONE request, over whichever transport this call resolved to.
 
         ``result.response`` is ``None`` when the 200 carried no completion at
         all — ``_retry_after_no_choices`` is what classifies that as a
@@ -606,16 +677,80 @@ class LlmClient:
         """
         logger.debug("Sending chat request (attempt %d/%d)", attempt + 1, self.max_retries)
         translated_messages = self._translate_messages(messages)
-        kwargs = self._build_chat_kwargs(
-            translated_messages, tools, format, token_budget, thinking_enabled
-        )
-        raw = await self.client.chat.completions.create(**kwargs)
-        if not raw.choices:
-            return _ChatAttemptResult(raw=raw, response=None)
+        if transport is PromptTransport.RAW_TEMPLATE:
+            raw = await self._send_raw_template_request(
+                translated_messages, tools, token_budget, thinking_enabled
+            )
+            if not raw.choices:
+                return _ChatAttemptResult(raw=raw, response=None)
+            response = self._parse_raw_template_response(raw)
+        else:
+            kwargs = self._build_chat_kwargs(
+                translated_messages, tools, format, token_budget, thinking_enabled
+            )
+            raw = await self.client.chat.completions.create(**kwargs)
+            if not raw.choices:
+                return _ChatAttemptResult(raw=raw, response=None)
+            response = self._parse_response(raw)
 
-        response = self._parse_response(raw)
         self._log_attempt(attempt, fault=None, provider=response.provider, detail="")
         return _ChatAttemptResult(raw=raw, response=response)
+
+    async def _send_raw_template_request(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+        token_budget: int | None,
+        thinking_enabled: bool,
+    ) -> openai.types.completion.Completion:
+        """Render the vendored template and send the result as a raw completion
+        (#2829) — the provider pin rides the same ``extra_body`` passthrough as
+        the chat transport (:meth:`_provider_pin_extra_body`); ``thinking_enabled``
+        is already baked into the rendered prompt's own bytes, so it is not sent
+        as a separate field here.
+        """
+        translated_tools = self._translate_tools(tools) if tools else None
+        prompt = raw_template.render_prompt(messages, translated_tools, thinking_enabled)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "stop": list(raw_template.STOP_SEQUENCES),
+            "extra_body": self._provider_pin_extra_body(),
+        }
+        if token_budget is not None:
+            kwargs["max_tokens"] = token_budget
+        return await self.client.completions.create(**kwargs)
+
+    def _provider_pin_extra_body(self) -> dict[str, Any]:
+        """The provider pin's own ``extra_body`` passthrough (#2829) — the ONE
+        place that builds it, so the raw-template request and the
+        raw-faithfulness check can never drift apart on whether the pin rides
+        along.  (They did: the check called ``completions.create`` with no
+        pin at all, so an OpenRouter run pinned to CoreWeave could still be
+        answered by any provider on the check — usually a chat-wrapping one —
+        while the real raw-template calls stayed correctly pinned.)  Empty
+        when no pin is configured, same as every other passthrough here.
+        """
+        extra_body: dict[str, Any] = {}
+        if self.provider_pin is not None:
+            extra_body[PROVIDER_REQUEST_FIELD] = self.provider_pin.as_request_field()
+        return extra_body
+
+    @staticmethod
+    def _parse_raw_template_response(raw: openai.types.completion.Completion) -> LlmResponse:
+        """Parse one raw completion's text into our ``LlmResponse`` (#2829) —
+        the raw-template counterpart of ``_parse_response``."""
+        choice = raw.choices[0]
+        thinking, tool_calls, content = raw_template.parse_completion(choice.text or "")
+        return LlmResponse(
+            message=LlmMessage(
+                role="assistant", content=content, tool_calls=tool_calls, thinking=thinking
+            ),
+            thinking=thinking,
+            model=raw.model,
+            provider=_provider_of(raw),
+            finish_reason=choice.finish_reason,
+        )
 
     def _not_found_error(self, attempt: int, error: openai.NotFoundError) -> LlmNotFoundError:
         """Log, then build the terminal error for a model that doesn't exist — never retried."""
@@ -789,6 +924,67 @@ class LlmClient:
                 fault=fault_for_status(getattr(error, "status_code", None)),
             ) from error
         return [model.id for model in response.data]
+
+    async def check_raw_template_faithfulness(self) -> RawFaithfulnessResult:
+        """Whether this endpoint serves this model's RAW completions faithfully
+        (#2829 build decision 3): one call of the bare BOS token, ``max_tokens``
+        1, must report exactly one prompt token — a provider whose
+        ``/v1/completions`` secretly wraps the prompt as a chat turn (Makora,
+        Cloudflare, Google per #2828/#2829 step 1) reports the wrap's own
+        turn-opening tokens on top (14, on one provider probed).
+
+        Carries the SAME provider pin as the real raw-template request
+        (:meth:`_provider_pin_extra_body`) — without it, a gateway routes this
+        check to any provider in the pool while the real calls stay pinned,
+        so a perfectly faithful CoreWeave answers nothing and an unrelated
+        chat-wrapping provider answers this check instead.  A transient fault
+        (429/5xx/timeout/connection) is retried on the client's OWN
+        retry/backoff helpers (the same ones ``_chat_attempts`` uses, not a
+        second loop) up to ``max_retries`` attempts: a run measured 71 of
+        1,275 samples hitting a single un-retried 429 here, which a naive
+        read-as-unfaithful turned into every later call on that sample
+        routing to the chat endpoint and 404ing on a model it never serves.
+
+        Never raises — exhausting every attempt still erroring answers
+        :attr:`RawFaithfulnessOutcome.UNVERIFIED` rather than propagating,
+        because an error here is a MOMENT, not a verdict, and a real call is
+        what surfaces a genuinely dead endpoint's own honest error (visible
+        degradation, not a guess made on its behalf).  Used by the startup
+        preflight (keeps the raw transport on ``UNVERIFIED``, falls back to
+        chat only on a real ``UNFAITHFUL`` answer, both named, never silent)
+        and the eval suite's pre-run endpoint smoke check (which MAY still
+        refuse on ``UNVERIFIED``, since it is the gate protecting a whole run).
+        """
+        last_error: LlmError | None = None
+        for attempt in range(self.max_retries):
+            try:
+                raw = await self.client.completions.create(
+                    model=self.model,
+                    prompt=raw_template.RAW_FAITHFULNESS_PROMPT,
+                    max_tokens=raw_template.RAW_FAITHFULNESS_MAX_TOKENS,
+                    extra_body=self._provider_pin_extra_body(),
+                )
+            except openai.APITimeoutError as error:
+                last_error = await self._retry_after_timeout(attempt, error)
+                continue
+            except openai.APIConnectionError as error:
+                last_error = await self._retry_after_connection_error(attempt, error)
+                continue
+            except openai.OpenAIError as error:
+                last_error = await self._retry_after_openai_error(attempt, error)
+                continue
+            prompt_tokens = raw.usage.prompt_tokens if raw.usage else None
+            outcome = (
+                RawFaithfulnessOutcome.FAITHFUL
+                if prompt_tokens == raw_template.RAW_FAITHFULNESS_EXPECTED_PROMPT_TOKENS
+                else RawFaithfulnessOutcome.UNFAITHFUL
+            )
+            return RawFaithfulnessResult(outcome=outcome, provider=_provider_of(raw))
+
+        return RawFaithfulnessResult(
+            outcome=RawFaithfulnessOutcome.UNVERIFIED,
+            detail=str(last_error) if last_error is not None else None,
+        )
 
     async def list_embedding_models(self) -> list[str]:
         """List embedding model ids from provider-specific /v1/embeddings/models.
@@ -1086,7 +1282,8 @@ class LlmClient:
     def _log_call(
         self,
         messages_snapshot: list[dict],
-        raw: openai.types.chat.ChatCompletion | None,
+        raw: _RawCompletion | None,
+        response: LlmResponse | None,
         tools: list[dict] | None,
         thinking: str | None,
         duration_ms: int,
@@ -1096,6 +1293,7 @@ class LlmClient:
         run_target: str | None,
         parent_run_id: str | None,
         parent_tool_call_id: str | None,
+        transport: PromptTransport,
         outcome: CallOutcome,
         *,
         error: Exception | None = None,
@@ -1108,7 +1306,12 @@ class LlmClient:
         ``raw`` is the dumped completion on :attr:`CallOutcome.COMPLETED`, ``None``
         on every other outcome — ``log_prompt`` writes the literal ``"{}"`` for a
         call with no response, which every existing reader already treats exactly
-        as it treats a falsy ``response`` (no change needed on their side).
+        as it treats a falsy ``response`` (no change needed on their side).  On the
+        raw-template transport the dump is RESHAPED to the chat endpoint's own
+        ``choices[].message`` shape (#2829, ``_raw_template_log_shape``) — every
+        existing reader of ``promptlog.response`` (the self-state header, the data
+        browser, the eval harness's own tool-call read) assumes that shape, which
+        the raw completions wire shape (``choices[].text``) does not carry.
 
         ``error.fault`` (an ``LlmFault`` — #2526) is persisted alongside the error's own
         class and message: every ``LlmError`` already carries this classification (set
@@ -1119,13 +1322,13 @@ class LlmClient:
         """
         if not self.db:
             return None
-        response = _dispatched_response(raw.model_dump()) if raw is not None else None
+        dumped = self._dumped_for_log(raw, response, transport) if raw is not None else None
         fault = getattr(error, "fault", None)
-        timing = usage_timing_from_response(response) if response is not None else UsageTiming()
+        timing = usage_timing_from_response(dumped) if dumped is not None else UsageTiming()
         return self.db.messages.log_prompt(
             model=self.model,
             messages=messages_snapshot,
-            response=response,
+            response=dumped,
             tools=tools,
             thinking=thinking,
             duration_ms=duration_ms,
@@ -1135,6 +1338,7 @@ class LlmClient:
             run_target=run_target,
             parent_run_id=parent_run_id,
             parent_tool_call_id=parent_tool_call_id,
+            transport=transport.value,
             call_outcome=outcome.value,
             call_error_class=type(error).__name__ if error is not None else None,
             call_error_message=str(error) if error is not None else None,
@@ -1145,6 +1349,16 @@ class LlmClient:
             prefill_ms=timing.prefill_ms,
             generation_ms=timing.generation_ms,
         )
+
+    @staticmethod
+    def _dumped_for_log(
+        raw: _RawCompletion, response: LlmResponse | None, transport: PromptTransport
+    ) -> dict:
+        """``raw``'s own dumped dict, shaped for the prompt log by transport."""
+        dumped = raw.model_dump()
+        if transport is not PromptTransport.RAW_TEMPLATE:
+            return _dispatched_response(dumped)
+        return _raw_template_log_shape(dumped, response)
 
 
 def _split_parallel_call(call_id: str, arguments: str | None) -> list[tuple[str, str]]:
@@ -1229,6 +1443,40 @@ def _dispatched_calls(call: dict) -> list[dict]:
         {**call, _ID_FIELD: call_id, _FUNCTION_FIELD: {**function, _ARGUMENTS_FIELD: arguments}}
         for call_id, arguments in calls
     ]
+
+
+def _raw_template_log_shape(dumped: dict, response: LlmResponse | None) -> dict:
+    """The raw completion's dump, reshaped to the chat endpoint's own
+    ``choices[].message`` shape for the prompt log (#2829).
+
+    The raw wire shape (``choices[].text``) carries no ``message`` at all, so
+    every existing reader of ``promptlog.response`` that assumes the chat
+    shape — the self-state header, the data browser, the eval harness's own
+    tool-call read — would see nothing.  Built from ``response`` (already
+    parsed by ``_parse_raw_template_response``, so this never re-parses and
+    never fails where that call already succeeded); ``response`` is ``None``
+    only when ``dumped`` carries no choices at all, in which case there is
+    nothing to reshape.
+    """
+    choices = dumped.get(_CHOICES_FIELD) or []
+    if response is None or not choices:
+        return dumped
+    message: dict[str, Any] = {"role": "assistant", "content": response.message.content}
+    if response.message.tool_calls:
+        message[_TOOL_CALLS_FIELD] = [
+            {
+                _ID_FIELD: call.id,
+                "type": "function",
+                _FUNCTION_FIELD: {
+                    "name": call.function.name,
+                    _ARGUMENTS_FIELD: json.dumps(call.function.arguments),
+                },
+            }
+            for call in response.message.tool_calls
+        ]
+    if response.thinking:
+        message["reasoning_content"] = response.thinking
+    return {**dumped, _CHOICES_FIELD: [{**choices[0], _MESSAGE_FIELD: message}]}
 
 
 # Base64 prefixes of each supported image format's magic bytes — the first bytes

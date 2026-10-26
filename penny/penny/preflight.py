@@ -21,10 +21,17 @@ from enum import StrEnum
 from pydantic import BaseModel
 
 from penny.config import Config
+from penny.llm import raw_template
 from penny.llm.client import LlmClient
 from penny.llm.decision_client import DecisionClient, DecisionError, decision_api_url
 from penny.llm.image_client import MfluxImageClient
-from penny.llm.models import LlmConnectionError, LlmError, LlmFault
+from penny.llm.models import (
+    UNREPORTED_PROVIDER,
+    LlmConnectionError,
+    LlmError,
+    LlmFault,
+    RawFaithfulnessOutcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +66,7 @@ class PreflightCheck(StrEnum):
     IMAGE_MODEL = "image-model"
     BROWSER_ADDON = "browser-addon"
     PRIMARY_CHANNEL = "primary-channel"
+    RAW_TEMPLATE_TRANSPORT = "raw-template-transport"
 
 
 _STATUS_ICON: dict[CheckStatus, str] = {
@@ -164,6 +172,7 @@ class Preflight:
         """Run every applicable check and collect the results — summary method."""
         candidates: list[CheckResult | None] = [
             await self._check_llm_endpoint(),
+            await self._check_raw_template_transport(),
             await self._check_embedding_model(),
             await self._check_decision_model(),
             await self._check_image_model(),
@@ -250,6 +259,48 @@ class Preflight:
             f"chat model {model!r} not available at {url} — pull it (`ollama pull {model}`) "
             f"or set LLM_MODEL to an installed model.",
         )
+
+    async def _check_raw_template_transport(self) -> CheckResult | None:
+        """The raw-template transport's own faithfulness, for a vendored-template
+        model (#2829 build decision 3) — soft warn, named degraded mode.
+
+        A model with no vendored template never reaches this check at all
+        (``None`` — not reported, the same shape the image/browser checks use
+        for "not applicable here").  The check itself never raises — it
+        retries a transient fault on its own backoff and comes back
+        UNVERIFIED rather than erroring, so this method only ever reads an
+        ``outcome``, never catches an exception.
+
+        Only a confirmed ``UNFAITHFUL`` answer falls the client back to the
+        chat transport for the rest of this deployment's life.  ``UNVERIFIED``
+        (every attempt still erroring after retries — a 71-of-1,275-sample run
+        hit an un-retried 429 here before this fix) KEEPS the raw transport: an
+        error is a moment, not a verdict, and a real call surfaces a genuinely
+        dead endpoint's own honest error on its own.  Either degraded case is
+        named, never silent (``docs/principles.md``'s visible-degradation
+        principle).
+        """
+        if not self.model_client.raw_template_enabled:
+            return None
+        name = PreflightCheck.RAW_TEMPLATE_TRANSPORT
+        url = self.config.llm_api_url
+        result = await self.model_client.check_raw_template_faithfulness()
+        if result.outcome is RawFaithfulnessOutcome.FAITHFUL:
+            return self._ok(name, f"raw completions served faithfully at {url}")
+        if result.outcome is RawFaithfulnessOutcome.UNVERIFIED:
+            detail = raw_template.RAW_FAITHFULNESS_UNVERIFIED_MESSAGE.format(
+                endpoint=url, detail=result.detail or "no detail"
+            )
+            return self._warn(name, detail)
+        # UNFAITHFUL: a real answer that disagrees — named off the response
+        # itself, not the configured pin (#2829), so a future mis-route (the
+        # pin not reaching the request, a gateway routing around it) names
+        # itself instead of hiding behind a pin that was never honoured.
+        answered_by = result.provider or UNREPORTED_PROVIDER
+        degraded_detail = raw_template.RAW_FAITHFULNESS_DEGRADED_MESSAGE.format(endpoint=url)
+        detail = f"{degraded_detail} ({answered_by} wraps raw completions as a chat turn)"
+        self.model_client.disable_raw_template_transport(detail)
+        return self._warn(name, detail)
 
     async def _check_embedding_model(self) -> CheckResult:
         """Embedding endpoint reachable + embedding model resolves (hard fail).

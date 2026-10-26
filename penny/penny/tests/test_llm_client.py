@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import httpx
 import openai
@@ -41,7 +42,10 @@ from penny.llm.models import (
     LlmTimeoutError,
     LlmToolCall,
     LlmToolCallFunction,
+    LlmToolParseError,
+    PromptTransport,
     ProviderPin,
+    RawFaithfulnessOutcome,
     fault_for_status,
     usage_timing_from_response,
 )
@@ -1416,3 +1420,363 @@ class TestImageDataUri:
     )
     def test_mime_type_comes_from_the_image_itself(self, image: str, expected: str) -> None:
         assert _image_data_uri(image) == expected
+
+
+# A model id with a vendored chat template (#2829) — matches both oMLX's own id and
+# OpenRouter's, via ``raw_template.has_vendored_template``'s substring match.
+_GEMMA_MODEL = "google/gemma-4-26b-a4b-it"
+
+
+def _text_completion(text: str, finish_reason: str = "stop", usage: dict | None = None):
+    """A minimal raw-completions-shaped response (#2829) — what the SDK hands
+    the raw template transport back from ``client.completions.create``."""
+
+    class _Choice:
+        def __init__(self, text: str, reason: str) -> None:
+            self.text = text
+            self.finish_reason = reason
+
+    class _Completion:
+        model = "m"
+        model_extra: dict = {}
+
+        def __init__(self, text: str, reason: str, usage: dict | None) -> None:
+            self.choices = [_Choice(text, reason)]
+            self.usage = usage
+
+        def model_dump(self) -> dict:
+            dumped: dict = {"choices": [{"text": text, "finish_reason": finish_reason}]}
+            if usage is not None:
+                dumped["usage"] = usage
+            return dumped
+
+    return _Completion(text, finish_reason, usage)
+
+
+class TestRawTemplateTransport:
+    """A model with a vendored chat template (#2829) routes through raw completions
+    instead of chat-completions, and its own grammar parses back into the same
+    ``LlmResponse`` shape either transport produces."""
+
+    @pytest.mark.asyncio
+    async def test_a_vendored_model_calls_raw_completions_not_chat(
+        self, monkeypatch, db: Database
+    ) -> None:
+        captured: dict = {}
+
+        async def chat_create(**kwargs):
+            raise AssertionError("the chat transport should not be called")
+
+        async def raw_create(**kwargs):
+            captured.update(kwargs)
+            return _text_completion(
+                "<|channel>thought\nchecking\n<channel|><|tool_call>call:collection_list"
+                '{collection:<|"|>jobs<|"|>,k:5}<tool_call|>'
+            )
+
+        client = LlmClient(
+            api_url="http://localhost:11434",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=1,
+            retry_delay=0.0,
+        )
+        monkeypatch.setattr(client.client.chat.completions, "create", chat_create)
+        monkeypatch.setattr(client.client.completions, "create", raw_create)
+
+        response = await client.chat(
+            [LlmMessage(role="user", content="list my jobs")],
+            agent_name="chat",
+            call_link=CallLink.top("run-raw"),
+        )
+        await client.close()
+
+        assert response.thinking == "checking"
+        assert response.message.tool_calls is not None
+        call = response.message.tool_calls[0]
+        assert call.function.name == "collection_list"
+        assert call.function.arguments == {"collection": "jobs", "k": 5}
+        assert captured["model"] == _GEMMA_MODEL
+        assert "<|turn>user" in captured["prompt"]
+        assert captured["stop"] == ["<turn|>", "<|tool_response>"]
+
+        with db.get_session() as session:
+            row = session.exec(select(PromptLog)).one()
+        assert row.transport == PromptTransport.RAW_TEMPLATE.value
+        # The prompt log stays reader-compatible with the chat shape (#2829) —
+        # every existing reader of ``promptlog.response`` assumes
+        # ``choices[].message``, which the raw wire shape alone doesn't carry.
+        logged_message = json.loads(row.response)["choices"][0]["message"]
+        assert logged_message["tool_calls"][0]["function"]["name"] == "collection_list"
+        assert logged_message["reasoning_content"] == "checking"
+
+    @pytest.mark.asyncio
+    async def test_an_image_bearing_call_still_uses_chat_even_on_a_vendored_model(
+        self, monkeypatch, db: Database
+    ) -> None:
+        """Images need the provider's own vision processor, which raw completions
+        has no equivalent for (#2829) — forced back to chat regardless of model."""
+
+        async def chat_create(**kwargs):
+            return _completion("I see it")
+
+        async def raw_create(**kwargs):
+            raise AssertionError("an image-bearing call must not route raw")
+
+        client = LlmClient(
+            api_url="http://localhost:11434",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=1,
+            retry_delay=0.0,
+        )
+        monkeypatch.setattr(client.client.chat.completions, "create", chat_create)
+        monkeypatch.setattr(client.client.completions, "create", raw_create)
+
+        await client.chat(
+            [LlmMessage(role="user", content="what is this", images=["c3VpdGNhc2U="])],
+            call_link=CallLink.top("run-image"),
+        )
+        await client.close()
+
+        with db.get_session() as session:
+            row = session.exec(select(PromptLog)).one()
+        assert row.transport == PromptTransport.CHAT.value
+
+    @pytest.mark.asyncio
+    async def test_a_structured_format_call_still_uses_chat_on_a_vendored_model(
+        self, monkeypatch, db: Database
+    ) -> None:
+        """``format`` is an OpenAI-API-level field gemma's raw template has no
+        construct for (#2829) — forced back to chat regardless of model."""
+
+        async def chat_create(**kwargs):
+            return _completion("{}")
+
+        async def raw_create(**kwargs):
+            raise AssertionError("a structured-format call must not route raw")
+
+        client = LlmClient(
+            api_url="http://localhost:11434",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=1,
+            retry_delay=0.0,
+        )
+        monkeypatch.setattr(client.client.chat.completions, "create", chat_create)
+        monkeypatch.setattr(client.client.completions, "create", raw_create)
+
+        await client.chat(
+            [LlmMessage(role="user", content="profile please")],
+            format={"type": "object"},
+            call_link=CallLink.top("run-format"),
+        )
+        await client.close()
+
+        with db.get_session() as session:
+            row = session.exec(select(PromptLog)).one()
+        assert row.transport == PromptTransport.CHAT.value
+
+    @pytest.mark.asyncio
+    async def test_disabling_the_raw_transport_reroutes_the_next_call_to_chat(
+        self, monkeypatch, db: Database
+    ) -> None:
+        """The startup preflight's raw-faithfulness check calls this on a failure
+        (#2829 build decision 3) — a named degraded mode for the rest of this
+        client's life, never a silent one."""
+
+        async def chat_create(**kwargs):
+            return _completion("fell back")
+
+        async def raw_create(**kwargs):
+            raise AssertionError("the raw transport was disabled and must not be called")
+
+        client = LlmClient(
+            api_url="http://localhost:11434",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=1,
+            retry_delay=0.0,
+        )
+        monkeypatch.setattr(client.client.chat.completions, "create", chat_create)
+        monkeypatch.setattr(client.client.completions, "create", raw_create)
+        assert client.raw_template_enabled
+
+        client.disable_raw_template_transport("endpoint wraps raw completions as a chat turn")
+        assert not client.raw_template_enabled
+
+        response = await client.chat(
+            [LlmMessage(role="user", content="hi")], call_link=CallLink.top("run-disabled")
+        )
+        await client.close()
+
+        assert response.content == "fell back"
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_raw_tool_call_raises_tool_parse_error(
+        self, monkeypatch, db: Database
+    ) -> None:
+        """A tool call that opens but does not parse is the same non-retried bucket
+        a malformed PROVIDER-parsed tool call falls into on the chat path (#2829)."""
+
+        async def raw_create(**kwargs):
+            return _text_completion("<|tool_call>call:foo{bad")
+
+        client = LlmClient(
+            api_url="http://localhost:11434",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=3,
+            retry_delay=0.0,
+        )
+        monkeypatch.setattr(client.client.completions, "create", raw_create)
+
+        with pytest.raises(LlmToolParseError):
+            await client.chat(
+                [LlmMessage(role="user", content="hi")], call_link=CallLink.top("run-malformed")
+            )
+        await client.close()
+
+        with db.get_session() as session:
+            row = session.exec(select(PromptLog)).one()
+        assert row.call_outcome == "raised"
+        assert row.transport == PromptTransport.RAW_TEMPLATE.value
+        assert row.response == "{}"
+
+    @pytest.mark.asyncio
+    async def test_the_faithfulness_check_carries_the_provider_pin_and_names_who_answered(
+        self, monkeypatch, db: Database
+    ) -> None:
+        """Regression (#2831 review): the check called ``completions.create`` with
+        no pin at all, so an OpenRouter run pinned to CoreWeave could still have
+        this ONE check answered by any provider in the pool — usually a
+        chat-wrapping one — while the real raw-template calls stayed correctly
+        pinned. The pin must ride the check's own request exactly like the real
+        one's (``_provider_pin_extra_body``), and the result names whichever
+        upstream actually answered (read off the response, not the pin)."""
+        captured: dict = {}
+
+        async def raw_create(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1),
+                model_extra={"provider": "CoreWeave"},
+            )
+
+        client = LlmClient(
+            api_url="https://gateway.example/api",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=1,
+            retry_delay=0.0,
+            provider_pin=ProviderPin.pin("CoreWeave"),
+        )
+        monkeypatch.setattr(client.client.completions, "create", raw_create)
+
+        result = await client.check_raw_template_faithfulness()
+        await client.close()
+
+        assert captured["extra_body"] == {
+            "provider": {"order": ["CoreWeave"], "allow_fallbacks": False}
+        }
+        assert result.outcome is RawFaithfulnessOutcome.FAITHFUL
+        assert result.provider == "CoreWeave"
+
+    @pytest.mark.asyncio
+    async def test_a_429_then_success_is_reported_faithful_not_unverified(
+        self, monkeypatch, db: Database
+    ) -> None:
+        """Regression (#2831 second review): a run measured 71 of 1,275 samples
+        hitting a single un-retried 429 here, which a naive read-as-unfaithful
+        turned into every later call on that sample 404ing against the chat
+        endpoint. A transient fault is retried on the client's own backoff
+        (``_retry_after_openai_error``) — a draw that answers on a LATER
+        attempt is FAITHFUL, not a verdict drawn from the error that preceded
+        it."""
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/completions")
+        response = httpx.Response(429, request=request, json={"error": {"message": "slow down"}})
+        attempts = {"count": 0}
+
+        async def raw_create(**kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise openai.RateLimitError("Error code: 429", response=response, body=None)
+            return SimpleNamespace(usage=SimpleNamespace(prompt_tokens=1), model_extra={})
+
+        client = LlmClient(
+            api_url="https://openrouter.ai/api",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=3,
+            retry_delay=0.0,
+            provider_pin=ProviderPin.pin("CoreWeave"),
+        )
+        monkeypatch.setattr(client.client.completions, "create", raw_create)
+
+        result = await client.check_raw_template_faithfulness()
+        await client.close()
+
+        assert result.outcome is RawFaithfulnessOutcome.FAITHFUL
+        assert attempts["count"] == 2
+        assert client.raw_template_enabled  # nothing disables it on a FAITHFUL answer
+
+    @pytest.mark.asyncio
+    async def test_a_persistent_429_is_unverified_not_unfaithful(
+        self, monkeypatch, db: Database
+    ) -> None:
+        """Every attempt still erroring after retries is UNVERIFIED — an open
+        question, not a confirmed chat-wrap — and keeps the raw transport
+        (#2831 second review): a real call surfaces the endpoint's own
+        availability error honestly, rather than this check guessing on its
+        behalf and routing every later call to a chat endpoint that doesn't
+        even serve the model."""
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/completions")
+        response = httpx.Response(429, request=request, json={"error": {"message": "slow down"}})
+
+        async def always_429(**kwargs):
+            raise openai.RateLimitError("Error code: 429", response=response, body=None)
+
+        client = LlmClient(
+            api_url="https://openrouter.ai/api",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=3,
+            retry_delay=0.0,
+        )
+        monkeypatch.setattr(client.client.completions, "create", always_429)
+
+        result = await client.check_raw_template_faithfulness()
+        await client.close()
+
+        assert result.outcome is RawFaithfulnessOutcome.UNVERIFIED
+        assert result.detail and "429" in result.detail
+        assert client.raw_template_enabled  # UNVERIFIED keeps the raw transport
+
+    @pytest.mark.asyncio
+    async def test_prompt_tokens_fourteen_is_the_chat_wrap_signature_and_disables(
+        self, monkeypatch, db: Database
+    ) -> None:
+        """A real answer whose ``prompt_tokens`` disagrees (14, a chat wrap's own
+        turn-opening tokens on the bare BOS token — #2829 step 1) is UNFAITHFUL,
+        the only outcome that disables the raw transport (#2831 second review)."""
+
+        async def raw_create(**kwargs):
+            return SimpleNamespace(usage=SimpleNamespace(prompt_tokens=14), model_extra={})
+
+        client = LlmClient(
+            api_url="https://openrouter.ai/api",
+            model=_GEMMA_MODEL,
+            db=db,
+            max_retries=1,
+            retry_delay=0.0,
+        )
+        monkeypatch.setattr(client.client.completions, "create", raw_create)
+
+        result = await client.check_raw_template_faithfulness()
+        assert result.outcome is RawFaithfulnessOutcome.UNFAITHFUL
+
+        # The preflight is what actually disables it, on exactly this outcome —
+        # already covered by test_disabling_the_raw_transport_reroutes_the_next_call_to_chat.
+        client.disable_raw_template_transport("chat-wraps raw completions")
+        assert not client.raw_template_enabled
+        await client.close()

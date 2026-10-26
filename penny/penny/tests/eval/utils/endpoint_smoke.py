@@ -31,9 +31,17 @@ from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel
 
+from penny.llm import raw_template
 from penny.llm.call_link import CallLink
 from penny.llm.client import LlmClient
-from penny.llm.models import LlmError, LlmFault, LlmMessage, ProviderPin
+from penny.llm.models import (
+    UNREPORTED_PROVIDER,
+    LlmError,
+    LlmFault,
+    LlmMessage,
+    ProviderPin,
+    RawFaithfulnessOutcome,
+)
 
 USAGE = "usage: python -m penny.tests.eval.utils.endpoint_smoke"
 
@@ -207,6 +215,79 @@ async def _smoke_once(
         await client.close()
 
 
+async def smoke_raw_template(
+    *, api_url: str, model: str, api_key: str, provider: str | None = None
+) -> SmokeResult | None:
+    """The raw-template transport's own faithfulness, before a run commits to it
+    (#2829 build decision 3).
+
+    ``None`` for a model with no vendored template — the suite's model
+    routes raw only by model identity, so a model this check does not apply
+    to is not reported, same as the image/browser preflight checks' shape
+    for "not applicable here".  Otherwise one call of the bare BOS token
+    must report exactly one prompt token; a provider whose ``/v1/completions``
+    secretly chat-wraps the prompt (Makora, Cloudflare, Google per
+    #2828/#2829) reports more — and the run REFUSES rather than silently
+    measuring the suite's model against the wrong input.
+    """
+    if not raw_template.has_vendored_template(model):
+        return None
+    return await _retrying(
+        lambda: _smoke_raw_template_once(
+            api_url=api_url, model=model, api_key=api_key, provider=provider
+        )
+    )
+
+
+async def _smoke_raw_template_once(
+    *, api_url: str, model: str, api_key: str, provider: str | None = None
+) -> SmokeResult:
+    """One raw-faithfulness check.  ``check_raw_template_faithfulness`` already
+    retries a transient fault (429/5xx/timeout/connection) on its own backoff
+    and never raises, so this reads the typed outcome rather than catching an
+    exception.
+
+    The eval smoke MAY still refuse the run on UNVERIFIED, since this check
+    is the gate protecting a whole run's worth of calls — but its message
+    says "unverified", never "not faithful": the two are different claims,
+    and conflating them is the bug a 71-of-1,275-sample run exposed (a 429
+    read as "not faithful" disabled the raw transport for the whole sample).
+    A refusal names the upstream that actually ANSWERED (``result.provider``,
+    read off the response itself), not the configured pin.
+    """
+    client = _smoke_client(api_url=api_url, model=model, api_key=api_key, provider=provider)
+    try:
+        result = await client.check_raw_template_faithfulness()
+        if result.outcome is RawFaithfulnessOutcome.FAITHFUL:
+            return SmokeResult(
+                subject="raw template",
+                ok=True,
+                detail=f"{model} serves raw completions faithfully at {api_url}",
+                provider=result.provider,
+            )
+        if result.outcome is RawFaithfulnessOutcome.UNVERIFIED:
+            return SmokeResult(
+                subject="raw template",
+                ok=False,
+                detail=(
+                    f"{model} at {api_url}: raw template faithfulness unverified "
+                    f"({result.detail or 'no detail'})"
+                ),
+            )
+        answered_by = result.provider or UNREPORTED_PROVIDER
+        return SmokeResult(
+            subject="raw template",
+            ok=False,
+            detail=(
+                f"{model} at {api_url}: raw completions are not faithful — "
+                f"{answered_by} wraps the prompt as a chat turn"
+            ),
+            provider=result.provider,
+        )
+    finally:
+        await client.close()
+
+
 async def smoke_embedding(*, api_url: str, model: str, api_key: str) -> SmokeResult:
     """Make real embedding calls until a usable vector comes back or a fault settles it.
 
@@ -259,13 +340,15 @@ def main(argv: list[str]) -> int:
         print(USAGE, file=sys.stderr)
         return 2
 
-    async def both() -> list[SmokeResult]:
-        return [
-            await smoke(
-                api_url=os.environ.get("LLM_API_URL") or _LOCAL_ENDPOINT,
-                model=os.environ.get("LLM_MODEL") or _DEFAULT_MODEL,
-                api_key=os.environ.get("LLM_API_KEY") or _DEFAULT_API_KEY,
-                provider=os.environ.get(LLM_PROVIDER_ENV) or None,
+    async def every_check() -> list[SmokeResult]:
+        model = os.environ.get("LLM_MODEL") or _DEFAULT_MODEL
+        api_url = os.environ.get("LLM_API_URL") or _LOCAL_ENDPOINT
+        api_key = os.environ.get("LLM_API_KEY") or _DEFAULT_API_KEY
+        provider = os.environ.get(LLM_PROVIDER_ENV) or None
+        candidates = [
+            await smoke(api_url=api_url, model=model, api_key=api_key, provider=provider),
+            await smoke_raw_template(
+                api_url=api_url, model=model, api_key=api_key, provider=provider
             ),
             await smoke_embedding(
                 api_url=os.environ.get("LLM_EMBEDDING_API_URL") or _LOCAL_ENDPOINT,
@@ -273,10 +356,12 @@ def main(argv: list[str]) -> int:
                 api_key=os.environ.get("LLM_EMBEDDING_API_KEY") or _DEFAULT_API_KEY,
             ),
         ]
+        return [result for result in candidates if result is not None]
 
-    # BOTH are reported before the verdict: knowing which of the two refused is the whole
-    # difference between a wrong model name and a dead vector backend.
-    results = asyncio.run(both())
+    # EVERY applicable check is reported before the verdict: knowing which one
+    # refused is the whole difference between a wrong model name, a chat-
+    # wrapping provider, and a dead vector backend.
+    results = asyncio.run(every_check())
     for result in results:
         print(result.render(), file=sys.stdout if result.ok else sys.stderr)
         provider_line = result.render_provider()
