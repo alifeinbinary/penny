@@ -385,14 +385,20 @@ async def test_history_window_is_a_byte_identical_prefix_across_growing_turns(
             renders.append(converted)
 
         # M=1,2: fewer turns than the window (2) — everything so far, growing.
-        assert renders[0] == ["user message 1", "reply 1 [1]"]
-        assert renders[1] == ["user message 1", "reply 1 [1]", "user message 2", "reply 2"]
+        # The handle names its domain (#2832) beside the number.
+        assert renders[0] == ["user message 1", "reply 1 [1] example.com"]
+        assert renders[1] == [
+            "user message 1",
+            "reply 1 [1] example.com",
+            "user message 2",
+            "reply 2",
+        ]
         # M=3: within the window's growth (up to 2*2-1=3) — a byte-identical
         # extension of renders[1], same handle number for the planted URL.
         assert renders[2][: len(renders[1])] == renders[1]
         assert renders[2] == [
             "user message 1",
-            "reply 1 [1]",
+            "reply 1 [1] example.com",
             "user message 2",
             "reply 2",
             "user message 3",
@@ -1523,8 +1529,8 @@ _BASIC_FLOW_STATIC_EXPECTED = (
     "response must come from the pages you read or your memory.\n"
     "\n"
     "Links are numbered, like [3]. When you reference something from a page, cite its "
-    "number in brackets — never an address. Links you were shown this turn are the only "
-    "links there are.\n"
+    "number in brackets — never an address. The links that exist are the ones you were "
+    "shown, in this turn's pages or in your own stored entries.\n"
     "\n"
     "When the user changes topics, just go with it.\n"
     "\n"
