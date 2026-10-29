@@ -405,6 +405,7 @@ class LlmClient:
         client_kwargs: dict[str, Any] = {
             "base_url": f"{self.api_url}/v1",
             "api_key": api_key,
+            "default_headers": {"X-Tosh-Agent": "off"},
             "max_retries": 0,  # We handle retries ourselves
         }
         if timeout is not None:
