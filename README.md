@@ -313,7 +313,7 @@ Penny auto-detects which channel to use based on configured credentials:
 
 ### Configuration Reference
 
-**LLM** — Penny talks to any OpenAI-compatible endpoint via the OpenAI Python SDK. There are no Ollama-specific dependencies in the runtime.
+**LLM** — Penny talks to any OpenAI-compatible endpoint via the OpenAI Python SDK. There are no Ollama-specific dependencies in the runtime. The shared SDK client sends `X-Tosh-Agent: off` so ToshLLM serves inference without wrapping Penny's requests in its own agent.
 - `LLM_API_URL`: API endpoint (default: `http://host.docker.internal:11434`)
 - `LLM_MODEL`: Single text model for all agents (default: `gpt-oss:20b`). Photo attachments ride the chat turn's own user message to this model, so it must understand images
 - `LLM_API_KEY`: API key (default: `"not-needed"`, fine for unauthenticated local backends)

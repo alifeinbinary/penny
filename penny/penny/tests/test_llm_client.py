@@ -66,6 +66,35 @@ def _make_status_error(
     return openai.NotFoundError("Error code: 404", response=response, body=body)
 
 
+@pytest.mark.asyncio
+async def test_requests_bypass_server_agent(monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    sdk_client = openai.AsyncOpenAI
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        monkeypatch.setattr(
+            openai,
+            "AsyncOpenAI",
+            lambda **kwargs: sdk_client(http_client=http_client, **kwargs),
+        )
+        client = LlmClient(
+            api_url="http://localhost:11434",
+            model="test-model",
+            max_retries=1,
+            retry_delay=0.0,
+        )
+        try:
+            await client.list_models()
+            assert len(requests) == 1
+            assert requests[0].headers.get("X-Tosh-Agent") == "off"
+        finally:
+            await client.close()
+
+
 class TestSummarizeLlmError:
     def test_html_error_body_is_not_dumped(self) -> None:
         """A 404 served as an HTML page is summarized by type + length, never dumped."""
