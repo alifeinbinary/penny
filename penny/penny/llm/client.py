@@ -281,6 +281,7 @@ class LlmClient:
         timeout: float | None = None,
         provider_pin: ProviderPin | None = None,
         runtime: RuntimeParams | None = None,
+        extra_headers: dict[str, str] | None = None,
     ):
         self.api_url = api_url.rstrip("/")
         self.model = model
@@ -303,9 +304,10 @@ class LlmClient:
         client_kwargs: dict[str, Any] = {
             "base_url": f"{self.api_url}/v1",
             "api_key": api_key,
-            "default_headers": {"X-Tosh-Agent": "off"},
             "max_retries": 0,  # We handle retries ourselves
         }
+        if extra_headers:
+            client_kwargs["default_headers"] = dict(extra_headers)
         if timeout is not None:
             # Keep connect timeout short; only extend read/write for slow models.
             client_kwargs["timeout"] = httpx.Timeout(
