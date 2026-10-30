@@ -3400,7 +3400,9 @@ class TestLogTools:
 
         # Whole-render: the tool returns the canonical projection byte-for-byte.
         # run_get passes with_thinking=True (#2841), so the comparison must too.
-        expected = render_run_calls(db.messages.get_run_prompts("news-1"), with_thinking=True)
+        expected = render_run_calls(
+            db.messages.get_run_prompts("news-1"), with_thinking=True, delivered_text=None
+        )
         assert result.message == expected
         assert result.message.startswith("run news-1")
         assert "collection_write(collection='ai-news'" in result.message
@@ -3515,7 +3517,7 @@ class TestLogTools:
 
     @pytest.mark.asyncio
     async def test_append_to_system_log_is_refused(self, db, mock_llm):
-        """Invariant #1: the four framework-managed system logs are written
+        """Invariant #1: the five framework-managed system logs are written
         only by Python side-effects.  ``log_append`` from any agent gets a
         readable refusal and writes nothing — guarding the conversation-turn
         reconstruction and the run audit trail from model-authored entries."""
