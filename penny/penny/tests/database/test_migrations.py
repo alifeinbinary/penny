@@ -82,7 +82,7 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        assert count == 131
+        assert count == 132
 
         conn = sqlite3.connect(db_path)
         tables = {
@@ -124,7 +124,7 @@ class TestMigrate:
 
         count1 = migrate(db_path)
         count2 = migrate(db_path)
-        assert count1 == 131
+        assert count1 == 132
         assert count2 == 0
 
     def test_tracks_in_migrations_table(self, tmp_path):
@@ -162,8 +162,8 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        # 0001 is skipped; the rest run = 130 migrations
-        assert count == 130
+        # 0001 is skipped; the rest run = 131 migrations
+        assert count == 131
 
     def test_bootstrap_with_tables_already_present(self, tmp_path):
         """If tables already exist (from SQLModel.create_tables), migration should succeed."""
@@ -189,7 +189,7 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        assert count == 131  # all migrations applied
+        assert count == 132  # all migrations applied
 
         conn = sqlite3.connect(db_path)
         cursor = conn.execute("SELECT name FROM _migrations")
@@ -907,11 +907,13 @@ class TestMigrate:
         0097 removed eight generic catch-alls and kept ``dislikes`` as "very narrow and
         specific"; the ruling retires that exemption too — no intermediate legacy
         structure is left standing.  Asserted as the whole end-state rather than by
-        name: the only ``memory`` rows left are the five log markers — Python-populated
-        perception rather than collections anybody would rebuild — plus the ONE
-        collection 0119 (#2633) deliberately re-introduced: the seeded, EMPTY ``rules``
-        collection, with no entries, no cursors, and no stored ``extraction_prompt`` —
-        every program from here on is one the user taught."""
+        name: the only ``memory`` rows left are the log markers (``user-messages``,
+        ``penny-messages``, ``browse-results``, ``collector-runs``, ``changelog``, and
+        ``run-health`` — #2845/#2843, migrations 0131–0132, after this test's original
+        cutoff) — Python-populated perception rather than collections anybody would
+        rebuild — plus the ONE collection 0119 (#2633) deliberately re-introduced: the
+        seeded, EMPTY ``rules`` collection, with no entries, no cursors, and no stored
+        ``extraction_prompt`` — every program from here on is one the user taught."""
         db_path = str(tmp_path / "test.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE _bootstrap (id INTEGER PRIMARY KEY)")
@@ -938,6 +940,7 @@ class TestMigrate:
             "penny-messages",
             "browse-results",
             "collector-runs",
+            "changelog",
             "rules",
             "run-health",
         }
