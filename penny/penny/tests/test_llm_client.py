@@ -68,8 +68,8 @@ def _make_status_error(
     return openai.NotFoundError("Error code: 404", response=response, body=body)
 
 
-@pytest.mark.asyncio
-async def test_requests_bypass_server_agent(monkeypatch) -> None:
+async def _capture_list_models_request(monkeypatch, **client_kwargs) -> httpx.Request:
+    """Run one list_models call and return the HTTP request the SDK sent."""
     requests: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -88,13 +88,26 @@ async def test_requests_bypass_server_agent(monkeypatch) -> None:
             model="test-model",
             max_retries=1,
             retry_delay=0.0,
+            **client_kwargs,
         )
         try:
             await client.list_models()
-            assert len(requests) == 1
-            assert requests[0].headers.get("X-Tosh-Agent") == "off"
         finally:
             await client.close()
+    assert len(requests) == 1
+    return requests[0]
+
+
+@pytest.mark.asyncio
+async def test_extra_headers_sent_on_requests(monkeypatch) -> None:
+    request = await _capture_list_models_request(monkeypatch, extra_headers={"X-Tosh-Agent": "off"})
+    assert request.headers.get("X-Tosh-Agent") == "off"
+
+
+@pytest.mark.asyncio
+async def test_no_extra_headers_by_default(monkeypatch) -> None:
+    request = await _capture_list_models_request(monkeypatch)
+    assert "X-Tosh-Agent" not in request.headers
 
 
 class TestSummarizeLlmError:
